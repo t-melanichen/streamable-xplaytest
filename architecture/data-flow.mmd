@@ -1,0 +1,61 @@
+%% Instantly Shareable Playtest — End-to-End Data Flow
+%% Render with any Mermaid-compatible tool (VS Code extension, GitHub, etc.)
+
+sequenceDiagram
+    participant Creator as Game Creator
+    participant Portal as xplaytest Portal<br/>(PlayTestFD)
+    participant PlayTest as PlayTest Core
+    participant PR as Partner Registry
+    participant GSSV as Game Streaming<br/>Services (GSSV)
+    participant Bayside as Play Xbox<br/>(Bayside)
+    participant Tester as Playtester
+
+    Note over Creator, Tester: === PLAYTEST CREATION ===
+
+    Creator->>Portal: Create playtest (cloud streaming enabled)
+    Portal->>PlayTest: POST /products/{id}/playtests
+    PlayTest->>PR: POST /v1/offerings (create private offering)
+    PR-->>PlayTest: offering ID, offering URL
+    PlayTest-->>Portal: playtest created + streaming link
+    Portal-->>Creator: Shareable streaming link
+
+    Note over Creator, Tester: === AUDIENCE CONFIGURATION ===
+
+    Creator->>Portal: Set audience DNA group
+    Portal->>PlayTest: Update playtest audience
+    PlayTest->>PR: PATCH /v1/offerings/{id} (update DNA group config)
+    PR-->>PlayTest: OK
+
+    Note over Creator, Tester: === BUILD UPLOAD & INGESTION ===
+
+    Creator->>Portal: Upload new game build
+    Portal->>PlayTest: Publish build to playtest
+    PlayTest->>PlayTest: ServiceBus: XPackagePlaytestPublishWorkflow
+    PlayTest->>GSSV: Ingest build into Game Streaming Services
+    GSSV-->>PlayTest: Build ingested
+    PlayTest->>PR: PUT /v1/offerings/{id}/titles (configure title with new build)
+    PR-->>PlayTest: OK
+    Note over GSSV: Build now streamable via private offering
+
+    Note over Creator, Tester: === TESTER STREAMING ===
+
+    Creator->>Tester: Share streaming link
+    Tester->>Bayside: Click link
+    Bayside->>Bayside: Authenticate user (login required first)
+    Bayside->>GSSV: GET /offerings (check DNA group membership)
+    GSSV-->>Bayside: Private offering details (if authorized)
+    alt User is in DNA group
+        Bayside->>Tester: Show playtest details + "Stream Now" button
+        Tester->>Bayside: Click "Stream Now"
+        Bayside->>GSSV: Start streaming session
+        GSSV-->>Tester: Game stream
+    else User NOT in DNA group
+        Bayside->>Tester: Access denied (no details leaked)
+    end
+
+    Note over Creator, Tester: === PLAYTEST DELETION ===
+
+    Creator->>Portal: Delete playtest
+    Portal->>PlayTest: DELETE /products/{id}/playtests/{playtestId}
+    PlayTest->>PR: DELETE /v1/offerings/{id}
+    PR-->>PlayTest: Offering cleaned up
