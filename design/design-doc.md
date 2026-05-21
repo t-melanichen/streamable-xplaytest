@@ -205,28 +205,40 @@ public async Task<string> CreatePlaytestOfferingAsync(PublishedPlaytestEntity pl
 }
 ```
 
-## 10. The ContentIngestion call (build publish)
+## 10. The TitleIngestion call (build publish)
 
-The exact request shape is gated on inspecting the NuGet — see [architecture/package-ingestion.md](../architecture/package-ingestion.md). Pseudocode:
+When a new build is published for a streaming-enabled playtest, PlayTest submits a **TitleIngestion** workflow job to GSSV. Verified contract from `services.contentingestion/.../Workflows/TitleIngestion.cs` and the consumption pattern in `services.contentingestion`'s `BulkIngest.razor` (Anthony, 2026-05-21). See [architecture/package-ingestion.md](../architecture/package-ingestion.md) and [design/field-mapping.md §6](field-mapping.md) for the full mapping.
 
 ```csharp
-public async Task IngestPlaytestBuildsAsync(PublishedPlaytestEntity playtest, IList<PlaytestServicingContentIdEntity> scids, CancellationToken ct)
+public async Task IngestPlaytestBuildAsync(PublishedPlaytestEntity playtest, IList<PlaytestServicingContentIdEntity> scids, CancellationToken ct)
 {
     if (!playtest.CloudStreamingEnabled) return;
 
-    var marketGroups = BuildMarketGroupPackages(playtest, scids);            // existing helper
-    var flightIds = await _audienceFlightResolver.ResolveAsync(playtest.SellerId, playtest.PublishedPlaytestAudiences, ct);
+    var name        = ContentEntityIdentifiers.GenerateNeutralStreamingPackageName(playtest.PlaytestName);
+    var titleId     = ContentEntityIdentifiers.GenerateTitleId(name, ServerPlatform.Xbox);
 
-    foreach (var marketGroup in marketGroups)
-    {
-        foreach (var packageId in marketGroup.PackageIds)
-        {
-            var request = BuildIngestPackageRequest(packageId, marketGroup, playtest, flightIds);
-            await _contentIngestionClient.IngestPackageAsync(request, ct);   // ← NuGet contract TBD
-        }
-    }
+    var productParams = new ProductIngestion.JobParameters(
+        partnerId:    playtest.SellerId,
+        titleId:      titleId,
+        productId:    playtest.PartnerCenterProductId,
+        platform:     ServerPlatform.Xbox,
+        name:         name,
+        description:  playtest.Description ?? string.Empty,
+        assets:       BuildPlaytestAssets(playtest, scids),  // ← shape TBD: see open-questions
+        flightId:     null,                                  // gating lives on the offering's AllowedFlights
+        sandboxId:    playtest.SandboxId);                   // TBD: playtest sandbox id
+
+    var titleParams = new TitleIngestion.JobParameters(
+        ProductIngestionJobParameters: productParams,
+        TitleCollection: null,                               // playtests don't belong to a TitleCollection
+        Expiry:          playtest.EndDate);                  // mirrors offering ExpirationTime
+
+    var jobId = await _contentIngestionClient.SubmitTitleIngestionAsync(titleParams, ct);   // method name TBD
+    // optional: persist jobId on the playtest for ops visibility / status polling
 }
 ```
+
+`BuildPlaytestAssets(...)` is the only remaining unknown. The bulk-ingest path in the Content Portal passes `assets: null` and lets GSSV resolve from the public store — that path won't work for playtests because playtest builds aren't store-published. **P0 blocker** to resolve with Anthony.
 
 ## 11. Failure modes & retries
 
@@ -256,9 +268,16 @@ public async Task IngestPlaytestBuildsAsync(PublishedPlaytestEntity playtest, IL
 
 ## 14. Open questions (for team — pulled into [open-questions-for-team.md](open-questions-for-team.md))
 
+**Status: many top blockers now answered or in-progress after Jack Heuberger call (2026-05-21). See `open-questions-for-team.md` for the full list including new questions 5f-5h.**
+
 Top blockers:
-1. **GSSV ContentIngestion exact request shape** — must come from NuGet inspection + GSSV team
-2. **Streaming infra defaults** — what `Regions` / `DefaultAllocationPools` / `ServiceLevel` should a playtest offering have? Is there a template offering to clone?
-3. **Where does the xplaytest portal frontend live?** — not in any of the 3 local repos
-4. **`PackageFlightingConfig` semantics** — is `PrincipalGroupId : Guid` the same as a DNA group id?
-5. **Seller-PartnerId resolution** — is `playtest.SellerId` directly usable as `OfferingV2.PartnerId`, or is there a lookup?
+1. **Rubber-stamp PR problem in prod** — Confirmed P0 by Jack. Every Partner Registry write creates an ADO PR; SFI forbids self-approval. Jack + Timi are designing a `playtest`-branch workaround that PlayTest's S2S identity can write to without a PR. **PlayTest is a net consumer here — we wait for whatever client methods they ship.** Demo fallback: manual approval. See `open-questions-for-team.md` §5.
+2. **TitleIngestion → Offering linking is GSSV-side work** — current TitleIngestion writes to a `TitleCollection`. Jack to extend it to write to an `Offering` ("pretty easy"). May block PlayTest implementation. See §5g.
+3. **`ProductIngestion.JobParameters.assets`** — Per Jack, likely `null` ("we just need a Big ID"). Open sub-question: does it work for **unpublished** playtest BigIds that aren't store-listed yet? See §5a.
+4. **`sandboxId` for playtest TitleIngestion** — still TBD. See §5b.
+5. **One offering per playtest, or shared offering with per-playtest titles?** — Jack's framing suggests both models exist. Need to decide for design review. See §5f.
+6. **S2S auth onboarding** — In progress with Jack: GSAM Services group add (for Dev API access) + Sage route + caller-app-id registration. Brian helping with the PlayTest service identity app id. See §5e.
+7. **Streaming infra defaults** — what `Regions` / `DefaultAllocationPools` / `ServiceLevel` should a playtest offering have?
+8. **Where does the xplaytest portal frontend live?** — not in any of the 3 local repos
+9. **`PackageFlightingConfig` semantics** — is `PrincipalGroupId : Guid` the same as a DNA group id?
+10. **Seller-PartnerId resolution** — is `playtest.SellerId` directly usable as `OfferingV2.PartnerId`, or is there a lookup?

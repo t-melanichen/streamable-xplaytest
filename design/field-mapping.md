@@ -131,9 +131,11 @@ These fields have no PlayTest counterpart. PlayTest will need a config-driven "p
 
 ## 6. Package URI / Build ingestion (P0.4)
 
-When a new build is published, PlayTest needs to call **GSSV ContentIngestion** so the build becomes streamable. This is the second integration.
+When a new build is published, PlayTest needs to call **GSSV Title Ingestion** so the build becomes streamable. This is the second integration. It's a **workflow** (not a sync call) and the right job type is `TitleIngestion` (per Anthony — wraps a child `ProductIngestion` job).
 
-### Data we have on each playtest package (from PlayTest, ready to pass)
+> **Sequencing reminder** (see also `architecture/package-ingestion.md`): offering creation happens at *playtest-create* time, before any build exists. TitleIngestion happens *per-build-publish*, triggered by the `XPackagePlaytestPublishWorkflowJobStatusTopicProcessor` ServiceBus event. They're decoupled in time.
+
+### Data we have on each playtest package (ready to pass)
 
 From `PlaytestPackageResponse` + `PublishedPlaytestPackageEntity` + `PlaytestServicingContentIdEntity`:
 
@@ -143,101 +145,109 @@ From `PlaytestPackageResponse` + `PublishedPlaytestPackageEntity` + `PlaytestSer
 | `MarketGroupId` | string | PlayTest DB |
 | `CMXPackageSetId` | string | PlayTest DB |
 | `ServicingContentId` | Guid (as string) | PlayTest DB, joined from `PlaytestServicingContentIdEntity` |
-| `ProductBigId` | string | playtest.PartnerCenterProductId |
-| `PublisherId` | string | playtest.SellerId |
-| `Sandbox` | string | constant `PackageConstants.RetailSandbox` |
-| `FlightIds` | List<string> | from `ResolveUserDnaGroupIds` (same DNA flight ids as offering) |
-| `PackageFamilyName` | string | from XProduct lookup (already done in XPackagePlaytestPublishWorkflow) |
+| `ProductBigId` | string | `playtest.PartnerCenterProductId` |
+| `PublisherId` | string | `playtest.SellerId` |
+| `Sandbox` | string | TBD — playtest sandbox, not `RETAIL` |
+| `FlightIds` | List<string> | from `ResolveUserDnaGroupIds` — **but likely not passed to ingestion** (offering gates instead) |
 
-These are also already grouped into `MarketGroupPackages` ({ MarketGroupId, PackageIds[], ServicingContentId }) by `BuildMarketGroupPackages` in `PlaytestBusinessLogic.cs:1024-1043`. Reuse that helper.
+These are also already grouped into `MarketGroupPackages` via `BuildMarketGroupPackages` in `PlaytestBusinessLogic.cs:1024-1043`. Reuse if we need per-market metadata.
 
-### GSSV ContentIngestion contract (what we have to discover from NuGet)
+### TitleIngestion workflow contract (verified shape)
 
-The client is in NuGet `Microsoft.GameStreaming.ContentIngestion.Client 1.0.2604.2902`. We've verified the following namespaces are available:
-
-- `Microsoft.GameStreaming.ContentIngestion.Client` — `IContentIngestionClient`, `ContentIngestionClient`
-- `Microsoft.GameStreaming.ContentIngestion.Contracts.External` — `WireStreamingPackage`, `PackageInfoForOfferValidation`, `StreamingPackageInfoV2`
-- `Microsoft.GameStreaming.ContentIngestion.Contracts.External.Assets` — `AssetMetadata`, `AssetProperties`, `AssetInfoV2`
-- `Microsoft.GameStreaming.ContentIngestion.Contracts.External.Query` — `PackageSearchQuery`, `IngestionEntityFilter`
-
-`WireStreamingPackage` (verified shape from mock):
-```csharp
-new WireStreamingPackage
-{
-    Id = Guid.NewGuid(),                        // GSSV-internal package id
-    GameMetadata = new AssetMetadata(
-        assetId: Guid.NewGuid(),
-        sourceId: <SourceId — likely PackageId>,
-        markets: ["US"],
-        platforms: ["GEN9"],
-        new AssetProperties
-        {
-            ProductId = <PartnerCenterProductId>,
-            NominalMarket = "US",
-        }),
-};
-```
-
-So a `WireStreamingPackage` has `Id`, `GameMetadata.AssetId`, `GameMetadata.SourceId`, `Markets`, `Platforms`, `Properties.ProductId`, `Properties.NominalMarket`, `Assets[]`.
-
-`PackageInfoForOfferValidation` has `PackageId : Guid`, `SourceId : Id`, `MainGameProperties : Dictionary<string,object>`, `Markets`.
-
-### Building the package URI / request to ContentIngestion
-
-> ⚠️ **The exact `IContentIngestionClient.IngestPackage*` method signature is in the NuGet assembly** — pull it locally to inspect. Don't ship before verifying.
-
-Based on the surrounding contracts (Assets, AssetMetadata, AssetProperties, Markets, Platforms), the ingestion request almost certainly takes a form like:
+Source: `Xbox.Streaming/_git/services.contentingestion/src/Product/ContentCatalog.Common.Contracts/Workflows/TitleIngestion.cs` (shared by Anthony 2026-05-21).
 
 ```csharp
-await contentIngestionClient.IngestPackageAsync(new IngestPackageRequest
+namespace Microsoft.GameStreaming.Services.ContentCatalog.Common.Contracts.Workflows;
+
+public static class TitleIngestion
 {
-    SourceId = packageId,                  // the XPackage PackageId
-    PartnerId = sellerId,                  // PublisherId
-    ProductId = partnerCenterProductId,    // BigId
-    Markets = marketGroup.Markets,         // resolve from MarketGroupId → markets
-    Platforms = ["GEN9"],                  // or per-package
-    Assets = [
-        new AssetInfoV2 {
-            AssetId = <CMXPackageSetId-derived or XPackage asset id>,
-            ...
-        },
-    ],
-    Sandbox = "RETAIL",
-    FlightIds = flightIds,                 // from ResolveUserDnaGroupIds
-}, cancellationToken);
+    public const string JobType = "TitleIngestion";
+
+    public record JobParameters(
+        ProductIngestion.JobParameters ProductIngestionJobParameters,
+        Id? TitleCollection,
+        DateTime? Expiry) : IIngestionParameters
+    {
+        public Id GetLockId() => $"{JobType}_{this.ProductIngestionJobParameters.PartnerId}_{this.ProductIngestionJobParameters.TitleId}";
+        // ...
+    }
+
+    public class JobState
+    {
+        public ChildJobState? ChildProductIngestionJob       { get; set; }
+        public IList<Guid>?   StreamingPackageIds            { get; set; }   // ← the IDs GSSV uses internally
+        public uint?          XboxTitleId                    { get; set; }
+        public string         StatusDetails                  { get; set; } = string.Empty;
+        public long           EstimatedInstallSizeInBytes    { get; set; }
+    }
+}
 ```
 
-But the actual request type name, properties, and required fields **must be confirmed by inspecting the NuGet** before implementation.
+### `ProductIngestion.JobParameters` constructor — verified consumption pattern
 
-### How to get the contract
+From the GSSV Content Portal's `BulkIngest.razor` (Anthony, 2026-05-21):
 
-1. Pull the NuGet package:
-   ```
-   nuget install Microsoft.GameStreaming.ContentIngestion.Client -Version 1.0.2604.2902 -Source <internal-feed>
-   ```
-2. Decompile `Microsoft.GameStreaming.ContentIngestion.Client.dll` with ILSpy / dotPeek and read `IContentIngestionClient`.
-3. Cross-reference with another internal service that already calls `IngestPackageAsync` (search the Microsoft codebase org-wide for `IContentIngestionClient` usages outside `services.partnerregistry`).
-4. Confirm with Anthony Keller / Timi Bolaji (GSSV team).
+```csharp
+using Microsoft.GameStreaming.ContentIngestion.Contracts.External.Workflow;
+
+ContentPortalProcessor.GetProductIngestionParameters(
+    partnerId:    this.PartnerId,
+    titleId:      p.TitleId,            // generated, not hand-rolled (see below)
+    productId:    p.ProductId,          // PartnerCenterProductId / BigId
+    platform:     ServerPlatform.Xbox,
+    name:         p.Name,               // generated, see below
+    description:  p.Description,
+    assets:       null,                 // ← null = let GSSV resolve from the public store
+    flightId:     null,                 // ← singular, optional
+    sandboxId:    this.SearchedSandboxId)
+```
+
+And `TitleId` + `Name` are **generated** by helpers in `Microsoft.GameStreaming.Services.Common.Content.Ids`:
+
+```csharp
+var name    = ContentEntityIdentifiers.GenerateNeutralStreamingPackageName(productTitle);
+var titleId = ContentEntityIdentifiers.GenerateTitleId(name, ServerPlatform.Xbox);
+```
+
+**Use these helpers — do not hand-roll TitleIds.**
+
+### Final mapping: PlayTest → `ProductIngestion.JobParameters`
+
+| Param | Type | PlayTest source |
+|---|---|---|
+| `partnerId` | `Id` | `playtest.SellerId` |
+| `titleId` | `Id` | `ContentEntityIdentifiers.GenerateTitleId(name, ServerPlatform.Xbox)` |
+| `productId` | `Id` | `playtest.PartnerCenterProductId` |
+| `platform` | `ServerPlatform` | `ServerPlatform.Xbox` |
+| `name` | string | `ContentEntityIdentifiers.GenerateNeutralStreamingPackageName(playtest.Name)` |
+| `description` | string | `playtest.Description` |
+| `assets` | TBD | **Likely `null` (per Jack, 2026-05-21)**: *"we just need a Big ID"*. GSSV pulls product metadata from the Microsoft Store using just the BigId. Open sub-question: does this hold for **unpublished** playtest builds (BigId exists but isn't store-listed yet)? See open-questions §5a. |
+| `flightId` | `Id?` | Likely `null`. Gating lives on `OfferingV2.AuthorizationOptions.AllowedFlights`, not on ingestion. Verify with Jack/Anthony. |
+| `sandboxId` | `Id` | TBD — playtests have their own sandbox; need GSSV's expectation. See open-questions §5b. |
+
+### Final mapping: PlayTest → `TitleIngestion.JobParameters`
+
+| Param | Source |
+|---|---|
+| `ProductIngestionJobParameters` | built above |
+| `TitleCollection` | `null` (TitleCollections like `"TESTXTESTING"`/`"CERTTITLES"` are GSSV-internal catalog groupings, not relevant to playtests) |
+| `Expiry` | `playtest.EndDate` |
+
+### What we do with the result (`JobState.StreamingPackageIds`)
+
+`Title` in Partner Registry has **no `BuildId` / `StreamingPackageId` field** — only `ProductId`. Strongly suggests GSSV joins `Product → StreamingPackages` server-side, so PlayTest doesn't have to PUT the ids back onto the Title.
+
+Jack's framing (2026-05-21) reinforces this: *"step one is ingest the game, step two is add it to an offering — which depending on the ingestion step you could potentially get for free."*
+
+**To confirm with Anthony/Jack**: once a TitleIngestion job completes, is there a follow-up call PlayTest has to make to "link" the StreamingPackageIds to the offering, or is the link implicit through ProductId? (We're betting on implicit.)
+
+### ⚠️ Caveat: TitleIngestion currently writes to a TitleCollection, not an Offering
+
+Per Jack (2026-05-21): *"TitleIngestion adds that title to a title collection. We would also need to expand this to work for offerings, but that's pretty easy to do."* This is **GSSV-side work** Jack will do. Until that ships, the "step 2" of getting the title onto the offering may be a separate manual PUT — or blocked entirely. See open-questions §5g.
 
 ### Trigger point in PlayTest
 
-After `XPackagePlaytestPublishWorkflow` completes, the `XPackagePlaytestPublishWorkflowJobStatusTopicProcessor` in PlayTest core gets the Service Bus event. The new branch:
-
-```csharp
-if (status == Success && playtest.CloudStreamingEnabled)
-{
-    foreach (var marketGroup in BuildMarketGroupPackages(publishedPlaytest, ...))
-    {
-        foreach (var packageId in marketGroup.PackageIds)
-        {
-            await _contentIngestionClient.IngestPackageAsync(
-                BuildIngestRequest(packageId, marketGroup, publishedPlaytest, flightIds),
-                ct);
-        }
-    }
-}
-await playtestBusinessLogic.UpdatePlaytestStatusAsync(...);
-```
+After `XPackagePlaytestPublishWorkflow` completes, the `XPackagePlaytestPublishWorkflowJobStatusTopicProcessor` in PlayTest core gets the Service Bus event. The new branch — see `architecture/package-ingestion.md` § "Trigger point in PlayTest" for the full code sample.
 
 ---
 

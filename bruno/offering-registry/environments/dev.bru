@@ -1,5 +1,5 @@
 vars {
-  baseUri: https://gssv-dev-test.xboxlive.com/api/partnerregistry
+  baseUri: http://localhost:9005
   offeringId: xpt-test-melanie-001
   titleId: t-xpt-test-melanie-001
   partnerId: REPLACE_WITH_YOUR_SELLER_ID
@@ -9,3 +9,11 @@ vars {
 vars:secret [
   bearerToken
 ]
+
+# Local-run env.
+# baseUri assumes you're running services.partnerregistry locally with
+# ASPNETCORE_ENVIRONMENT=Development. In that mode the S2S auth policy is
+# bypassed (Startup.cs:386: policy.RequireAssertion(context => true)),
+# so `bearerToken` is unused but kept for parity with other envs.
+#
+# Source for port 9005: appsettings.en-development.json:9 (HostingSettings.ServicePort)

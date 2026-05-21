@@ -30,7 +30,11 @@ design/
 research/
   ├─ playtest-service.md            Xbox.Xbet.Service/src/PlayTest notes
   ├─ partner-registry.md            services.partnerregistry (= GSSV offering registry) notes
-  └─ bayside-play-xbox.md           Xbox.JS/apps/play-xbox notes
+  ├─ bayside-play-xbox.md           Xbox.JS/apps/play-xbox notes
+  └─ call-notes-jack-heuberger-2026-05-21.md   ← Jack (xCloud, built TitleIngestion) onboarding call
+
+bruno/
+  └─ offering-registry/             Bruno collection: exercise GSSV /v1/offerings live
 ```
 
 ## Services Involved (3 local repos)
@@ -60,3 +64,5 @@ research/
 - [research/playtest-service.md](research/playtest-service.md)
 - [research/partner-registry.md](research/partner-registry.md)
 - [research/bayside-play-xbox.md](research/bayside-play-xbox.md)
+- [research/call-notes-jack-heuberger-2026-05-21.md](research/call-notes-jack-heuberger-2026-05-21.md) — onboarding call with Jack (xCloud, built TitleIngestion)
+- [bruno/offering-registry/README.md](bruno/offering-registry/README.md) — Bruno collection for testing offering create/get/update/delete against GSSV dev

@@ -17,13 +17,47 @@ Or download from https://www.usebruno.com/
 
 ## Environments
 
-| Env | Base URL | Notes |
-|---|---|---|
-| `dev` | `https://gssv-dev-test.xboxlive.com/api/partnerregistry` | Auth bypassed (`policy.RequireAssertion(context => true)`). Start here. |
-| `int` | `https://gssv-dev-int.xboxlive.com/api/partnerregistry` | Bearer token required. AAD app must be in `RegistryManagementConfig.AllowedS2SAppIds`. |
-| `prod` | `https://gssv-dev-prod.xboxlive.com/api/partnerregistry` | DO NOT use for testing. Real production. |
+| Env | Base URL | Auth | Notes |
+|---|---|---|---|
+| `dev` | `http://localhost:9005` | **None — bypassed** | Requires you to run `services.partnerregistry` locally. **Start here.** |
+| `dev-hosted` | `https://gssv-dev-test.xboxlive.com/api/partnerregistry` | Real Xbox Live S2S bearer | Hosted "test" environment. ADO PATs and personal AAD tokens are rejected at the edge — see "Hosted endpoints" below. |
+| `int` | `https://gssv-dev-int.xboxlive.com/api/partnerregistry` | Real Xbox Live S2S bearer | Same auth model as `dev-hosted`. |
+| `prod` | `https://gssv-dev-prod.xboxlive.com/api/partnerregistry` | Real Xbox Live S2S bearer | DO NOT use for testing. Real production. |
 
-Source for the URLs: `services.partnerregistry/src/Product/PartnerRegistryService/appsettings.en-development.json:29` (and `appsettings.en-int.json`, `appsettings.en-prod.json`).
+URLs verified from `services.partnerregistry/src/Product/PartnerRegistryService/appsettings.en-development.json:29` and `appsettings.en-int.json` / `appsettings.en-prod.json`. Local port 9005 from `appsettings.en-development.json:9`.
+
+## Quick start (recommended: run the service locally)
+
+This is the fastest path to a working `200 OK` and is what you should do for solo dev.
+
+```powershell
+cd "C:\Users\t-melanichen\OneDrive - Microsoft\Desktop\services.partnerregistry\src\Product\PartnerRegistryService"
+$env:ASPNETCORE_ENVIRONMENT = "Development"
+dotnet run
+```
+
+The service listens on `http://localhost:9005` (per `appsettings.en-development.json`). The S2S auth policy is bypassed in `Development` (see `Startup.cs:386` — `policy.RequireAssertion(context => true)`), so Bruno requests don't need a real token.
+
+Then:
+1. In Bruno pick the **dev** environment
+2. Fill in `partnerId`, `productId` in `environments/dev.bru`
+3. Run **`Offerings/put-offering.bru`** → expect `200`/`204`
+
+> ⚠️ Local-run dependencies you may also need: a CosmosDB emulator (`appsettings.en-development.json:20-23` points at `https://localhost:8081`). Install from https://learn.microsoft.com/azure/cosmos-db/local-emulator if you don't already have it.
+
+## Hosted endpoints (`dev-hosted` / `int` / `prod`) — why your token probably won't work
+
+Verified empirically 2026-05-21: hitting `GET https://gssv-dev-test.xboxlive.com/api/partnerregistry/v1/offerings` with each of the following returns `HTTP 401`, empty body, no `WWW-Authenticate` header:
+
+- No `Authorization` header at all
+- An Azure DevOps PAT as `Bearer`
+- An `az account get-access-token` against `https://xboxlive.com` (fails to mint — `xboxlive.com` isn't an AAD resource in the Microsoft tenant: `AADSTS500011`)
+
+The 401 is coming from the **Xbox Live edge gateway**, not the partner registry service. The edge expects an Xbox Live S2S bearer (likely XSTS, not raw AAD JWT). After the edge, the service still enforces `ApplicationAuthorizationRequirement` against `RegistryManagementConfig.AllowedS2SAppIds` (see `appsettings.en-int.json:27-29`, e.g., `57280b9e-304b-43cf-87b5-dc8644677f0c` for ostg). So you need **both**:
+1. A token the edge accepts (Xbox Live S2S, format TBD — onboarding ask for GSSV team)
+2. Your app id in the allowlist (onboarding ask for GSSV team)
+
+Until those are sorted, **stick to the `dev` local-run env**. Tracked in `design/open-questions-for-team.md`.
 
 ## Variables to set per environment
 
@@ -38,29 +72,15 @@ Open `environments/<env>.bru` and edit:
 | `dnaGroupId1` | A DNA group GUID. Get one from GMS by calling `IGMSServiceClient.GetUserGroupAsync` and looking at the returned `UserDnAGroupIds[]`. For dev testing, any GUID works. |
 | `bearerToken` (secret) | Only needed for int/prod. See "Getting a bearer token" below. |
 
-## Getting a bearer token (for int/prod only)
+## Getting a bearer token (only for `dev-hosted`/`int`/`prod`)
 
-The auth policy on `OfferingsController` is `PartnerRegistryAuthPolicy.S2S` (see `services.partnerregistry/src/Product/PartnerRegistryService/Configuration/PartnerRegistryAuthPolicy.cs`). In non-dev environments it requires:
-- A valid AAD JWT (`AuthScheme.DefaultBearer`)
+> ⚠️ This is currently a blocked path. Verified empirically that ADO PATs and personal-AAD tokens are rejected by the Xbox Live edge. Until GSSV onboards us, **use the `dev` (local-run) env**. Onboarding questions tracked in `design/open-questions-for-team.md`.
+
+The auth policy on `OfferingsController` is `PartnerRegistryAuthPolicy.S2S` (see `services.partnerregistry/.../Configuration/PartnerRegistryAuthPolicy.cs`). In non-Development environments it requires:
+- A valid Xbox Live S2S bearer (token format TBD — XSTS vs AAD-via-GSSV-helper)
 - The token's app id must be in `RegistryManagementConfig.AllowedS2SAppIds` (see `appsettings.en-int.json:27-29`)
 
-Quickest way to get a token for testing:
-
-```powershell
-# Sign in with your work account
-az login
-
-# Get a token. The resource id is GSSV's AAD app id — get the exact value from the GSSV team.
-# Example using a placeholder resource id:
-az account get-access-token --resource "<GSSV-RESOURCE-ID>" --query accessToken -o tsv
-```
-
-Then paste the token into the `bearerToken` secret var in the active environment.
-
-> ⚠️ Your personal AAD account most likely does NOT have the right S2S role for int/prod.
-> You'll either need (a) the PlayTest service's AAD app id added to `AllowedS2SAppIds`,
-> or (b) to use the GSSV team's test app id (ask Anthony Keller).
-> Until then, **stick to dev** — it bypasses auth entirely.
+When unblocked, paste the token into the `bearerToken` secret var in the active environment.
 
 ## Requests in this collection
 

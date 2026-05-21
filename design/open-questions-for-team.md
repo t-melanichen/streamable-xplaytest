@@ -41,12 +41,81 @@ The project doc explicitly notes: *"Currently 'flight' / 'DNA Group' auth doesn'
 - What change is needed to include flight-authed offerings in the user's response?
 - Is this a P0 blocker for the project or a parallel workstream?
 
-### 5. Should playtest offerings bypass the ADO PR approval flow?
-Partner Registry has a `RegistryManagementController` that creates Azure DevOps PRs for offering changes. Success metric requires "within a few seconds" of playtest creation — incompatible with PR review.
+### 5. The rubber-stamp PR problem — confirmed P0 blocker (per Jack Heuberger, 2026-05-21)
+Every change to an offering in Partner Registry (adding a title, updating audience) creates an ADO PR. In test, an MSI created the PR and Jack just approved it (~1 min later it reflected in services). In **prod**, SFI now forwards the requester's user identity (`Melanie Chen made the pull request`) so you **cannot self-approve**. There's no automatic rubber-stamp today. This blocks every playtest-with-streaming, not just initial setup.
 
-**Ask**:
-- Can PlayTest call `OfferingsController` directly (`PUT /v1/offerings/{id}`) and skip the PR flow?
-- Or does playtest offering creation need to go through a fast-path that auto-approves PRs?
+**Status**: Jack + Timi are working on a workaround. Loose proposal:
+- Create a separate `playtest` branch in Partner Registry alongside `main`
+- That branch has relaxed protections (no PR required to merge)
+- Special client methods that PlayTest's S2S identity calls to write to the `playtest` branch
+- Services reference the `playtest` branch in playtest-specific cases
+
+**Status quo for the intern demo**: manually rubber-stamp the PR to move the playtest flow along.
+
+**Do nothing on the PlayTest side until Jack + Timi land the workaround**. We're net consumers of whatever they ship.
+
+### 5a. TitleIngestion `assets` parameter for unpublished playtest builds — likely answered (2026-05-21)
+Per Jack: *"we just need a Big ID"* (= `PartnerCenterProductId`). GSSV pulls product metadata from the Microsoft Store using just the Big ID and stores it. Implies **`assets: null` is correct for playtests** — same pattern as the bulk-ingest UI — assuming the playtest's PartnerCenterProductId resolves through the store flow.
+
+**Open sub-question (still ask Anthony or Jack)**:
+- Does this hold for **unpublished** playtest builds? The Big ID exists in Partner Center before any public store publication, but does GSSV's store-pull path accept Big IDs that aren't yet store-listed? If not, what's the alternative for the not-yet-published case?
+
+### 5b. TitleIngestion `sandboxId` for playtests — partially answered
+The bulk-ingest UI takes a sandbox id. Jack didn't explicitly say what to pass for a playtest.
+
+**Ask Jack**:
+- For a playtest, do we pass the playtest's allowlisted sandbox id (e.g. `Playtest-{sellerId}`), or `RETAIL`?
+
+### 5c. TitleIngestion `flightId` — singular vs offering-side gating
+`ProductIngestion.JobParameters.flightId` is **singular** (and optional). The bulk-store path passes `null` and lets the offering's `AuthorizationOptions.AllowedFlights` gate access.
+
+**Ask Jack / Anthony**:
+- Confirm: for playtests with multi-flight audiences (multiple DNA groups), pass `flightId: null` at ingestion and put the flights on the offering — correct?
+- If not, do we need to submit multiple TitleIngestion jobs (one per flight)?
+
+### 5d. After TitleIngestion completes — do we have to PUT anything back?
+`JobState.StreamingPackageIds : IList<Guid>` are the ingested package IDs. `Title.cs` in Partner Registry has **no slot for them** — strongly suggests GSSV joins them server-side via ProductId. Jack's framing of *"step one is ingest the game, step two is add it to an offering (which depending on the ingestion step you could potentially get for free)"* reinforces this.
+
+**Ask Anthony**:
+- Confirm: once TitleIngestion completes, GSSV server-side links the StreamingPackageIds to the offering through ProductId — PlayTest doesn't need to do a follow-up PUT to the offering / title. Right?
+- Is there a status notification we should subscribe to, or do we poll `GetJobStateAsync(jobId)`?
+
+### 5e. Authentication for hitting GSSV from S2S — in progress (Jack, 2026-05-21)
+Verified 2026-05-21 that hitting `https://gssv-dev-test.xboxlive.com/api/partnerregistry/v1/offerings` with no token, an Azure DevOps PAT, or a personal-AAD token all return `HTTP 401` from the Xbox Live edge.
+
+**Jack's plan** (committed for ~tomorrow):
+- Add Melanie to the **GSAM Services group** (for Dev API access as a dev)
+- Register PlayTest's service client app id in **Sage** (Service API Gateway) for the production S2S path
+- Add a route entry in Sage for `PUT /v1/offerings/{id}` (and any other endpoints PlayTest needs)
+- Brian (manager) to help track down the service client app id for the PlayTest service identity
+- Provide a **LinkPad** starter scaffold so Melanie can prototype GSSV calls locally as C# scripts against Dev API
+
+**Reframes the question**: there's no need to mint our own XSTS/AAD token by hand. Going through Dev API (for dev) or Sage (for S2S prod) handles the auth.
+
+### 5f. New question: One offering per playtest, or shared offering with per-playtest titles?
+From Jack: *"Our PMs come in here, type in the game [to add to an existing testing offering]"* — implies a shared "testing offering" model with titles added per game.
+
+But earlier: *"[Offerings] let us create special instances of xCloud for different groups, different flights, different individual users with different games and whatever associated with them"* — implies per-flight or per-playtest offerings are possible.
+
+**Ask Jack / Anthony**:
+- Should each playtest have its own dedicated `OfferingV2` (one playtest = one offering, with that playtest's audience flights on it), OR
+- Should there be a shared "playtest" offering per seller / per audience-type, and we add a new Title per playtest into it?
+- The shared model means fewer offerings to manage but trickier DNA-group gating (all titles share `AuthorizationOptions.AllowedFlights`); the per-playtest model is simpler but creates many offerings.
+
+### 5g. New question: GSSV-side work to extend TitleIngestion to write to Offering
+Per Jack: *"TitleIngestion adds that title to a title collection. So we would also need to expand this to work for offerings, but that's pretty easy to do."*
+
+**Ask Jack**:
+- Who owns this extension and what's the timeline? Is it a prerequisite for any PlayTest implementation we do?
+- New `TitleIngestion.JobParameters` field (e.g. `OfferingId : Id?` instead of/in addition to `TitleCollection`)?
+- Or a new job type entirely (e.g. `OfferingIngestion`)?
+
+### 5h. New question: Do GSSV services support a way to add a playtest sandbox?
+Sandboxes are an Xbox concept used heavily by GSSV (e.g. `RETAIL`, `CERT`, `Playtest-*`). For playtest TitleIngestion to work, the playtest's sandbox needs to be recognized by GSSV.
+
+**Ask Jack**:
+- Is there a one-time setup to register a new playtest sandbox with GSSV?
+- Or does GSSV's store-pull path infer sandbox from the Big ID?
 
 ---
 

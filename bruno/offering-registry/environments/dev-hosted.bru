@@ -1,0 +1,27 @@
+vars {
+  baseUri: https://gssv-dev-test.xboxlive.com/api/partnerregistry
+  offeringId: xpt-test-melanie-001
+  titleId: t-xpt-test-melanie-001
+  partnerId: REPLACE_WITH_YOUR_SELLER_ID
+  productId: REPLACE_WITH_PARTNER_CENTER_PRODUCT_ID
+  dnaGroupId1: 00000000-0000-0000-0000-000000000001
+}
+vars:secret [
+  bearerToken
+]
+
+# Hosted test env — REQUIRES auth, NOT a local-run bypass.
+#
+# Verified 2026-05-21: hitting GET /v1/offerings here with no token, with an
+# Azure DevOps PAT, and with az-minted "https://xboxlive.com" token all return
+# HTTP 401 at the Xbox Live edge (no WWW-Authenticate header, empty body).
+#
+# What works: a valid Xbox Live S2S bearer (XSTS or AAD-via-GSSV-helper) whose
+# principal/app id is in `RegistryManagementConfig.AllowedS2SAppIds`
+# (services.partnerregistry/.../appsettings.en-int.json:27-29).
+#
+# Onboarding asks (track in design/open-questions-for-team.md):
+#   - The exact token format the edge expects (XSTS vs AAD?)
+#   - The resource id / audience for `az account get-access-token`
+#   - A test S2S app id to add to the dev allowlist
+#   - The helper library or sample code for minting the token
