@@ -1,139 +1,84 @@
 # Architecture: Flights, DNA Groups, and Playtest Audiences
 
-> **Status**: Investigation summary — contains a critical open question for the team
-
-This is one of the trickiest mapping problems in the project. The project doc says:
-
-> *"Only users authorized for the playtest are configured for access to the Private Offering, likely through the integration of DNA group support in xCloud."*
-
-But the existing **OfferingV2** model in `services.partnerregistry` does **not** have a "DNA group" concept. It has **flights**. This document explains what we found and the open question.
+> The DNA group → Flight mapping is **already implemented in PlayTest** and used today by the XPackage publish workflow. The same pipeline gets reused for the GSSV offering creation.
 
 ---
 
-## What the Code Actually Has
+## The data flow (verified — `PlaytestBusinessLogic.cs:1054-1123`)
 
-### `Flight` model
-**File**: `services.partnerregistry\src\Product\PartnerRegistryClient\Contracts\Flight.cs:10-23`
+```
+Playtest creator picks audiences in xplaytest portal
+            │
+            ▼
+PlaytestAudience  { AudienceId : Guid, GmsGroupId : string }
+            │
+            ▼  IGMSServiceClient.GetUserGroupAsync(sellerId, gmsGroupId)
+            │
+GMS Group response  { Id, Name, Members[], UserDnAGroupIds[] }
+            │
+            ▼  flatten + distinct across all audiences
+List<string> flightIds   ←──── these ARE the DNA group GUIDs
+            │
+            ├─► Used today as:
+            │     PlaytestPublishJobParameters.FlightIds
+            │     PlaytestDeleteJobParameters.FlightIds
+            │     (consumed by XPackagePlaytestPublishWorkflow)
+            │
+            └─► For our project, also used as:
+                  OfferingV2.AuthorizationOptions.AllowedFlights = flightIds.Select(id => new Flight { FlightId = id })
+                  Title.AllowedFlights = same
+                  (optionally) Title.PackageFlightingConfig.FlightId / PrincipalGroupId
+```
 
+## The contract classes
+
+### `PlaytestAudienceRequest` / `PlaytestAudienceResponse` (PlayTest)
+```csharp
+[ProtoContract]
+public record PlaytestAudienceRequest
+{
+    [ProtoMember(1)] public Guid AudienceId { get; set; }
+    [ProtoMember(2)] public string GmsGroupId { get; set; }   // GMS = Group Management Service
+}
+```
+Validated by `AudienceMustBeValidRule` — every audience must have a non-empty `GmsGroupId`.
+
+### GMS Group (resolved via `IGMSServiceClient`)
+The relevant property after the GMS call is `group.UserDnAGroupIds : string[]` — a flat list of DNA group GUIDs. PlayTest just dedupes across audiences.
+
+### `Flight` (GSSV, in `services.partnerregistry/.../Contracts/Flight.cs`)
 ```csharp
 public class Flight
 {
-    /// If not null or empty, users must be members of the provided flightId to access this offering
-    public string FlightId { get; set; }
-
-    /// If access requires flight membership, and this value is not null or empty, users must be
-    /// not only members of the flight, but also one of the specific variations listed
-    public ICollection<string> FlightVariations { get; set; }
+    public string FlightId { get; set; }                       // DNA group GUID goes here
+    public ICollection<string> FlightVariations { get; set; }  // null for playtest
 }
 ```
 
-### `PlayerAuthorizationOptions` (on `OfferingV2.AuthorizationOptions`)
-**File**: `services.partnerregistry\src\Product\PartnerRegistryClient\Contracts\PlayerAuthorizationOptions.cs:11-79`
+### `PlayerAuthorizationOptions.AllowedFlights : ICollection<Flight>`
+On `OfferingV2.AuthorizationOptions`. Each DNA group becomes one `Flight` entry. Membership in any one allowed flight grants access.
 
-```csharp
-public class PlayerAuthorizationOptions
-{
-    public bool AllowAllAuthenticatedUsers { get; set; }
-    public ICollection<string> AllowedPlayerUserIds { get; set; }
-    public ICollection<string> AllowedPlayerXuids { get; set; }
-    public ICollection<string> AllowedPuids { get; set; }
-    public ICollection<Flight> AllowedFlights { get; set; }          // ← USE THIS
-    public ICollection<Flight> AdditionalClaimsFlights { get; set; }
-    public ICollection<string> AllowedEntitlements { get; set; }
-    public ICollection<string> AllowedSubscriptions { get; set; }
-    public ICollection<string> AllowedCountries { get; set; }
-    public Id? AllowedSandboxId { get; set; }
-    public bool CheckStoreEntitlements { get; set; }
-}
-```
+## Reuse strategy
 
-### `PackageFlightingConfig` (on `Title.PackageFlightingConfig`)
-**File**: `services.partnerregistry\src\Product\PartnerRegistryClient\Contracts\PackageFlightingConfig.cs:11-30`
+The intern should **not** reinvent this. Two options:
 
-```csharp
-public class PackageFlightingConfig
-{
-    public Id FlightId { get; set; }
-    public Guid PrincipalGroupId { get; set; }   // ← suspicious: is this the DNA group?
-    public Id XipFlightId { get; set; }
-    public Id XipVariationId { get; set; }
+### Option A — extract a shared helper (recommended)
+Refactor `PlaytestBusinessLogic.ResolveUserDnaGroupIds` (private, line 1060) into an `IAudienceFlightResolver` interface in `PlayTest.BusinessLogic`, used by:
+- `QueuePublishJobAsync` (existing call site)
+- `QueueDeleteJobAsync` (existing call site)
+- the new offering-creation path in `PartnerRegistryServiceClient`
 
-    public bool IsEnrollable() =>
-        !string.IsNullOrWhiteSpace(this.XipFlightId) &&
-        !string.IsNullOrWhiteSpace(this.XipVariationId);
-}
-```
+### Option B — duplicate the call in the new client
+If the refactor is risky, just call `IGMSServiceClient.GetUserGroupAsync` directly from the new `PartnerRegistryServiceClient` and project to `Flight[]`. Less elegant but lower-risk and ships faster.
 
-`PrincipalGroupId` is a `Guid`. **DNA groups are typically expressed as GUIDs.** This strongly suggests `PrincipalGroupId` IS the DNA group reference at the package-flighting level — but the team must confirm.
+## Validation rule parity
 
-### Validation rules
-**File**: `services.partnerregistry\src\Product\PartnerRegistryService\Processors\Validation\ValidationProcessorUtilities.cs:1920-1985`
+PlayTest already enforces: "if `PlaytestType.Private` and FlightIds is empty → reject" (`PlaytestBusinessLogic.cs:897`).
 
-- `PackageFlightingConfig` is rejected for title collections (i.e., it's per-title)
-- `FlightId` must be present
-- `FlightId` must parse as `Guid`
-- `PrincipalGroupId` must be non-empty
-- `XipFlightId` and `XipVariationId` must both exist for "enrollable" flights
+Mirror this for the offering call: if cloud streaming is enabled and no DNA groups resolve to flight ids, **fail loudly before calling GSSV** — never create an offering with `AllowAllAuthenticatedUsers = true` for a playtest.
 
-### No `DnaGroup` class exists in the repo
-A grep for `DnaGroup`, `Dna`, `Audience`, `AccessGroup`, `UserGroup` in `services.partnerregistry/src/` returned **no contract classes**. The closest things are the `Flight` model and `PrincipalGroupId` on `PackageFlightingConfig`.
+## Open questions for the team (confirm before shipping)
 
----
-
-## The Playtest Side
-
-In PlayTest (`Xbox.Xbet.Service/src/PlayTest`), playtest audiences are represented as `Audiences` on the `PlaytestResponse`/`PlaytestCreateRequest`/`PlaytestUpdateRequest` contracts. The PlaytestGroups controller (`/products/{productId}/playtestgroups`) manages this list. The audience model in PlayTest is the source of truth for "who can test."
-
-What we don't yet know:
-- Does the PlayTest `Audience` model already hold DNA group IDs?
-- Or does it hold user XUIDs / emails that get *resolved* into a DNA group at runtime?
-
-**Action**: read `src/PlayTest/PlayTest/Database/Entities/` and the `Audience` contract to find out (queued).
-
----
-
-## ⚠️ Open Question for the Team
-
-> **How should a playtest audience's DNA group(s) be encoded into an `OfferingV2.AuthorizationOptions`?**
-
-Three possibilities — please confirm with the team (likely Anthony Keller or Timi Bolaji):
-
-### Option A — Use `AllowedFlights` with the DNA group ID as `FlightId`
-```csharp
-offering.AuthorizationOptions.AllowedFlights = new[]
-{
-    new Flight { FlightId = "<dna-group-guid>", FlightVariations = null }
-};
-```
-- **Pro**: Leverages existing model; no schema changes.
-- **Con**: Relies on convention — `FlightId` is a `string`, so it could hold anything. The auth pipeline downstream must know to interpret this as a DNA group lookup.
-
-### Option B — Set `PackageFlightingConfig.PrincipalGroupId` on each `Title`
-```csharp
-title.PackageFlightingConfig = new PackageFlightingConfig
-{
-    FlightId = "<some-flight-guid>",
-    PrincipalGroupId = Guid.Parse("<dna-group-guid>"),
-    XipFlightId = ...,
-    XipVariationId = ...,
-};
-```
-- **Pro**: `PrincipalGroupId` looks semantically correct (it's a `Guid`, not a string).
-- **Con**: Required validation says `XipFlightId`/`XipVariationId` must also be filled in if enrollable — adds dependencies. Also per-title rather than per-offering.
-
-### Option C — A new property must be added to `OfferingV2`
-The P0 goal *"Private offerings support DNA group access compatible with playtest"* may explicitly require a new model field. The project doc notes:
-
-> *"Currently 'flight' / 'DNA Group' auth doesn't show up in a user's /offerings call. This is a problem for the UX."*
-
-This suggests there's a real gap — flights/DNA groups don't propagate to the user-facing `/offerings` response yet. The fix might require a Partner Registry contract change *and* a downstream consumer (GSSV) change.
-
----
-
-## Questions to ask the team
-
-1. Is `PackageFlightingConfig.PrincipalGroupId` the existing DNA group hook? If yes, what generates/registers DNA group GUIDs today?
-2. Where is the "GA flight" defined (`XusAudience.IsGAFlight(flightId)` is used in validation)? Is there an `XusAudience` lookup that resolves a flight ID into a sandbox + DNA group?
-3. When a user calls GSSV's `/offerings` endpoint, what code path determines whether a flight-authed offering is included in the response? What change is needed there?
-4. Should playtest offerings get a brand new `Audience`/`DnaGroup` property on `OfferingV2`, or can they reuse the existing `AllowedFlights`?
-5. Who manages the DNA group lifecycle — does xplaytest create the DNA group from the playtest audience, or is the DNA group already registered elsewhere and xplaytest just gets the ID?
+1. **`PackageFlightingConfig.PrincipalGroupId : Guid`** — is this the same DNA group id as the flight, or a separate concept? Validation rule says it must be non-empty and `FlightId` must parse as Guid (so the convention is "DNA group GUID = FlightId = PrincipalGroupId" — sanity check with Anthony Keller).
+2. **`XusAudience.IsGAFlight(flightId)`** is used to distinguish GA flights from non-GA. Where does the `XusAudience` definition live? If it's needed at runtime to decide pool selection, PlayTest's offering needs to follow the same convention so the validation passes.
+3. **Are FlightVariations ever needed for playtest**? Today's PlayTest pipeline only resolves bare flight ids — no variations. Confirm the GSSV side accepts bare-flight offerings without variations.

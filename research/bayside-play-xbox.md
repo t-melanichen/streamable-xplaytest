@@ -1,77 +1,100 @@
-# Research: Bayside / Play Xbox (Xbox.JS)
+# Research: Play Xbox (Bayside) in Xbox.JS
 
 ## Location
-- Repo: `Xbox.JS`
-- App: `apps/play-xbox/` (this IS Bayside)
-- Also: `apps/xboxcom-edgewater/` (Xbox.com — less relevant)
+- Repo root: `C:\Users\t-melanichen\projects\Xbox.JS`
+- App: `apps/play-xbox/`
+- Game streaming package: `packages/@play-xbox/route/game-stream/`
+- Offering enrollment: `packages/@play-xbox/feature/offering-enrollment/`
 
-## What It Is
-**Play Xbox (Bayside)** is the player-facing web app for Xbox Cloud Gaming (`xbox.com/play`). It handles:
-- Game streaming sessions
-- Offering enrollment
-- Game library / catalog browsing
-- Account auth
+## What It Does
+Play Xbox (codename **Bayside**) is the player-facing web app at `xbox.com/play`. It handles cloud game streaming, catalog browsing, offering enrollment, and (for Game Pass tiers) library/quests/streaming-room features. Built on **React Router v7** (`react-router: ^7.13.1`).
 
-## Tech Stack
-- **React 18** + React Router v7
-- **TanStack Query** (data fetching/caching)
-- **Vite** (build tooling)
-- **Express** (SSR server)
-- **Tailwind CSS** + XDS (Xbox Design System)
-- Monorepo managed by **Nx** + **Yarn**
+## Verified Routes (file `apps/play-xbox/src/app/routes.ts`)
 
-## Relevant Packages (for this project)
+| Route | File | Notes |
+|---|---|---|
+| `/stream/:productId/:productName?` | `CloudConsoleStreamRoute.tsx` (lines 203-219) | Primary streaming entry point. Used today for Game Pass streaming. **This is the most likely target for shareable playtest links.** |
+| `/_internal/dev-tools/offering/:offeringId` | `OfferingBrowserRoute.ts` (lines 363-379) | Internal dev tool for browsing offerings — useful for testing |
+| `/play` | home | catalog/browse |
+| (Game Pass library / quests routes) | various | Game Pass tier-gated UI |
 
-| Package | Purpose |
-|---------|---------|
-| `@play-xbox/route-game-stream` | Game streaming route/page |
-| `@play-xbox/route-product-detail` | Product detail page |
-| `@play-xbox/react-components-offering-enrollment` | Offering enrollment UI |
-| `@play-xbox/game-stream-has-streaming-access` | Check if user has streaming access |
-| `@play-xbox/route-offers-and-credits` | Offers display |
-| `@play-xbox/route-remote-play` | Remote play route |
+## Loader Behavior on `/stream/:productId`
 
-## How It Connects to Backend
-- Express server as BFF (Backend for Frontend)
-- React Router loaders fetch data during SSR into TanStack Query
-- Calls GSSV's `/offerings` endpoint to get available offerings for the user
-- Existing developer mode supports private offering URLs
+File: `packages/@play-xbox/route/game-stream/src/loader.server.ts:28-83`
 
-## Existing Private Offering Support
-From `apps/play-xbox/docs/How Tos/Enable Developer Mode.md`:
-- Dev mode already allows testing with private offerings
-- There's existing infrastructure for passing offering IDs to the streaming flow
-- Settings/Developer tab has offering-related configuration
+```ts
+const { activeOfferingInfo } = await gameStream.authentication.queries.activeOfferingInfo({ productId });
+const { detailed } = await catalog.queries.productInfo.detailed({ productId });
+// ...
+if (activeOfferingInfo.isPrivate) {
+  return { type: 'redirectingToAuth', ... };   // avoids hydration leak
+}
+```
 
-## What Needs to Change (P0)
+Key behaviors:
+- The loader already handles `isPrivate` offerings — it returns an early redirect to avoid leaking the title's metadata before auth.
+- The catalog query (`productInfo.detailed`) fetches product metadata using the Universal Store ProductId — works for unreleased playtest products **iff** the product is in the catalog.
 
-### 1. Handle Playtest Streaming Link
-- When a tester clicks a shareable playtest link (e.g., `xbox.com/play/playtest/{offeringId}`):
-  1. Force authentication first (no details revealed pre-login)
-  2. Check if user is in the offering's DNA group
-  3. If authorized: show playtest details (title, art, metadata) + "Stream Now" button
-  4. If not authorized: show generic access denied (no metadata leak)
+## Existing Auth Check
 
-### 2. DNA Group Check in /offerings
-- Currently DNA group auth doesn't surface in `/offerings` responses (known issue)
-- Need GSSV or ContentAccess to include playtest private offerings in a user's available offerings
-- This might be a GSSV-side fix rather than a Bayside change
+File: `packages/@play-xbox/feature/cloud-console-stream/src/access/useHasStreamingAccess.ts:11-33`
 
-### 3. Playtest Metadata Display
-- When showing a playtest offering, display as much metadata as possible:
-  - Game title, genre, art (from store/playtest data)
-  - Indicate this is a "non-public version" / playtest build
-  - Show "Install Locally" OR "Stream Now" options (P0 just needs streaming)
+```ts
+const hasUltimateAccess = hasUltimateAccess(user);
+const hasStandardAccess = hasStandardAccess(user);
+const hasCoreAccess = hasCoreAccess(user);
+return hasUltimateAccess || hasStandardAccess || hasCoreAccess;
+```
 
-### 4. Security: No Information Leakage
-- Bayside must NOT reveal playtest details to unauthorized users
-- Login must happen BEFORE any offering/game details are shown
-- The link itself should not contain game title or other metadata
+**Today, the streaming gate is Game Pass tier only.** There is no DNA-group or flight check in this hook. For playtest streaming, we'll need either:
+- A new branch in this hook that also returns `true` when the user is in the playtest's flight, OR
+- A separate "private offering enrollment" path that bypasses this hook (since the user already enrolled via the link).
 
-## Open Questions
-- What's the exact URL format for the shareable link? Options:
-  - `xbox.com/play/launch/{offeringId}` (existing pattern?)
-  - `xbox.com/play/playtest/{playtestId}` (new route)
-  - A short URL / redirect service
-- Does Bayside need a new route or can it use the existing offering enrollment flow?
-- How does the existing `game-stream-has-streaming-access` package work with DNA groups?
+## Private Offering Dev Mode
+
+File: `packages/@play-xbox/route/game-stream/src/loader.server.ts` and adjacent
+
+Dev/test pattern for overriding the offering:
+```
+?configs=streaming.auth.offering:<offeringId>
+?configs=auth.xbox.sandboxId:<sandboxId>
+```
+
+This is the existing knob for forcing a specific offering on a stream URL. **It's a strong candidate for the production shareable link format**, e.g.:
+```
+https://www.xbox.com/play/stream/{productId}?configs=streaming.auth.offering:xpt-{playtestId}
+```
+
+But it's a dev-mode pattern today, so the team may want a cleaner production URL (e.g., a dedicated `/playtest/{token}` route) — worth confirming with PM.
+
+## Offering Enrollment
+
+File: `packages/@play-xbox/feature/offering-enrollment/src/components/OfferingEnrollment.tsx:27-167`
+
+- Renders a QR code + an external enrollment URL constructed from the user's XUID + an offering enrollment URL.
+- Has its own gated UI for offering-specific flows.
+
+This is reusable for the "user clicks shareable link → enroll in offering → stream" flow, **if** offering enrollment is the right model (vs. the flight membership being checked at session-creation time).
+
+## GSSV URL Pattern (used by streaming client)
+
+Format: `https://{prefix}.gssv-play-{httpEnv}.xboxlive.com`
+
+Matches the `DedicatedFQDN` pattern on `OfferingV2` in Partner Registry: when `DedicatedFQDN = true`, the offering gets a hostname like `{offeringid}.gssv-play-prod.xboxlive.com`.
+
+## What's NOT in Bayside today
+
+- No DNA-group / flight membership check in the client
+- No "playtest" route or component (greenfield)
+- No "this is a private playtest, here's the metadata" preview component
+- No `xplaytest` route — the xplaytest portal is **not in Xbox.JS** at all (likely a Partner Center frontend in a separate repo)
+
+## Recommended Pattern for the Shareable Link
+
+1. Tester receives link: `https://www.xbox.com/play/stream/{productId}?configs=streaming.auth.offering:xpt-{playtestId}`
+2. Bayside loader fetches `activeOfferingInfo` — recognizes `isPrivate`, redirects to auth if not signed in
+3. After auth, loader resolves offering, GSSV checks the user is in the offering's `AllowedFlights[].FlightId`
+4. If allowed, render the streaming UI with the playtest's metadata (Name, GameArtUrl, Description from PlayTest contract)
+5. If not allowed, render a "you don't have access to this playtest" page (must NOT leak title metadata for unreleased games)
+
+**Open UX question**: should there be an explicit "claim your playtest invite" intermediate page (consume the link once), or should the link be replayable for the duration of the playtest?

@@ -1,67 +1,107 @@
-# Research: PlayTest Service (Xbox.Xbet.Service)
+# Research: PlayTest in Xbox.Xbet.Service
 
-## Location
-- **Core service**: `src/PlayTest/PlayTest/`
-- **Front-door (Partner Center proxy)**: `src/PlayTestFD/PlayTestFD/`
-- **ContentAccess** (related): `src/ContentAccess/ContentAccess/`
+## Locations
+- Repo root: `C:\Users\t-melanichen\source\repos\Xbox.Xbet.Service`
+- PlayTest core service: `src/PlayTest/PlayTest`
+- PlayTest front door: `src/PlayTest/PlayTestFD`
+- PlayTest tests: `src/PlayTest/PlayTest.Tests`, `src/PlayTest/PlayTestFD.Tests`
 
-## Architecture
+## What It Does Today
+**PlayTest core** is a backend service for CRUD on playtests + per-playtest data: audiences, packages, statuses, deletion lifecycle. It exposes operations like `CreatePlaytestAsync`, `UpdatePlaytestAsync`, `UpdatePlaytestStatusAsync`, `FinalizePlaytestDeletionAsync`, `RegisterPlaytestPackageAsync`.
 
-### PlayTest Core
-- **Route**: `/products/{partnerCenterProductId}/playtests`
-- **Controllers**:
-  - `PlaytestsController` — full CRUD: Get, GetAll, Create, Update, Delete, Publish
-  - `PlaytestGroupsController` — audience/group management
-  - `ContentAccessController` — content access integration
-- **Business Logic**: `PlaytestBusinessLogic` with dependency injection
-- **Database**: Cosmos DB (via `Database/` folder)
-- **ServiceBus processors** (key for build ingestion):
-  - `XPackagePlaytestPublishWorkflowJobStatusTopicProcessor` — fires when a build is published
-  - `XPackagePlaytestDeleteWorkflowJobStatusTopicProcessor` — fires when a playtest is deleted
-- **Validations**: Audience, Package, AgeRatings rules
-- **Service Clients**: Uses typed `ServiceClients/` for S2S calls
+**PlayTestFD** is the Partner Center-facing proxy for playtest operations. Route prefix is `/api/{locale}/dashboard/products/{productId}/playtests`.
 
-### PlayTestFD (Front Door)
-- **Route**: `/api/{locale}/dashboard/products/{productId}/playtests`
-- **Controllers**:
-  - `PlaytestsController` — proxies GetAll, GetById to PlayTest core
-  - `GroupsController` — proxies audience group operations
-- **Headers required**: `MS-CV`, `SellerAccountId`
-- Thin proxy layer — no business logic of its own
+**ContentAccess** (also in Xbox.Xbet.Service) handles content-access decisions for playtests at runtime — i.e., "is this user allowed to play this playtest's product?" It calls GSSV upstream for streaming-related decisions.
 
-### Key Data Models
-- `PlaytestResponse` — full playtest details
-- `PlaytestModel` — summary model
-- `PlaytestsResponseModel` — list response
-- `PlaytestStatus` enum — lifecycle states
+## Persistence — Important Correction
 
-## What Needs to Change (P0)
+Earlier notes incorrectly said PlayTest uses Cosmos. **It does not.**
 
-### 1. Add Partner Registry ServiceClient
-- Create new `IPartnerRegistryClient` / `PartnerRegistryClient` in PlayTest's `ServiceClients/`
-- Follow existing pattern: extend `Shared.Common.ServiceClient`
-- Methods needed:
-  - `CreateOfferingAsync(offeringConfig)` → POST `/v1/offerings`
-  - `DeleteOfferingAsync(offeringId)` → DELETE `/v1/offerings/{id}`
-  - `UpdateOfferingAsync(offeringId, config)` → PATCH/PUT `/v1/offerings/{id}`
-  - `UpdateOfferingTitleAsync(offeringId, titleConfig)` → PUT `/v1/offerings/{id}/titles`
+- PlayTest uses **SQL Server + Entity Framework** with a cutover pattern.
+- See `src/PlayTest/PlayTest/Database/DatabaseAccess.cs:20-144` — orchestrates read/write through SQL.
+- `PlaytestSqlClient.cs` exists but is a stub today; the real path is through `DatabaseAccess`.
 
-### 2. Modify PlaytestBusinessLogic
-- On `CreatePlaytest`: if cloud streaming enabled, call Partner Registry to create offering
-- On `DeletePlaytest`: if offering exists, call Partner Registry to delete it
-- On audience/group update: call Partner Registry to update offering DNA group config
-- Store `offeringId` in playtest Cosmos document for later reference
+## Existing ServiceClient Pattern (template for new PartnerRegistry client)
 
-### 3. Extend ServiceBus Publish Processor
-- `XPackagePlaytestPublishWorkflowJobStatusTopicProcessor`: after build is published, trigger:
-  1. GSSV build ingestion (new S2S call)
-  2. Partner Registry title update (configure offering to use new build)
+The only outbound HTTP S2S service client in PlayTest today is `AgeRatingServiceClient`:
 
-### 4. Add Flights/Allowlist Check
-- Gate private offering creation behind a flight flag
-- Only allow specific sellers (allowlist) during development
-- Leverage existing `Configurations/` patterns
+- File: `src/PlayTest/PlayTest/ServiceClients/AgeRatingService/AgeRatingServiceClient.cs:27`
+- Pattern:
+  - Extends `Shared.Common.ServiceClient`
+  - Constructor takes `HttpClient`, `IOptionsMonitor<TConfig>`, `IS2SAuthHelper`, `ILogger`
+  - Resolves S2S scope from `configuration.CurrentValue.ResourceId`
+  - Method-level routes via `[UrlFormat("...")]` attribute, with `ReplaceTokens(...)` + `UrlFormatParameters` for path interpolation
+  - Calls `_s2sAuthHelper.AddS2SAuthHeaderAsync(request, _s2SScope, ct)` before sending
+  - Uses `SendAsync(request, ct)` and `ThrowIfHttpFailedAsync(response, ct)` from the base class
+- Config in `appsettings.json` under section `AgeRatingServiceClient` (lines 69-87)
 
-### 5. Return Offering Details via PlayTestFD
-- PlayTestFD response should include `streamingLink` constructed from offering details
-- Format likely: `https://xbox.com/play/launch/[offeringId]` or similar Bayside deep link
+A second strong template lives in **XCloudCore**: `src/XCloudCore/XCloudCore/ServiceClients/XCloudServiceClient.cs` — same pattern.
+
+**Action for the project**: build `PartnerRegistryServiceClient` in `src/PlayTest/PlayTest/ServiceClients/PartnerRegistryService/` using these as templates. Methods:
+- `Task<OfferingV2> GetOfferingAsync(string offeringId, CancellationToken ct)`
+- `Task PutOfferingAsync(string offeringId, OfferingV2 offering, CancellationToken ct)`
+- `Task DeleteOfferingAsync(string offeringId, CancellationToken ct)`
+- `Task PutTitleAsync(string offeringId, string titleId, string partnerId, Title title, CancellationToken ct)`
+
+Add the new section to `appsettings.json`. Wire up in `Startup.cs` next to AgeRatingServiceClient.
+
+## ServiceBus Topic Processors (existing — extension points)
+
+### `XPackagePlaytestPublishWorkflowJobStatusTopicProcessor`
+- File: `src/PlayTest/PlayTest/ServiceBus/MessageProcessors/XPackagePlaytestPublishWorkflowJobStatusTopicProcessor.cs:18-73`
+- `JobType => CoreXPackageJobType.XPackagePlaytestPublishWorkflow`
+- Subscribes to topic `job-status` / subscription `playtest`
+- **Today**: only calls `UpdatePlaytestStatusAsync`
+- **For our project**: this is the extension point. When status indicates a successful publish, branch on "is this playtest cloud-streaming enabled?" and call GSSV ContentIngestion.
+
+### `XPackagePlaytestDeleteWorkflowJobStatusTopicProcessor`
+- File: `src/PlayTest/PlayTest/ServiceBus/MessageProcessors/XPackagePlaytestDeleteWorkflowJobStatusTopicProcessor.cs:22-83`
+- **Today**: calls `UpdatePlaytestStatusAsync` + `FinalizePlaytestDeletionAsync` on Deleted status
+- **For our project**: also branch on cloud-streaming enabled — call `DELETE /v1/offerings/{offeringId}` on Partner Registry.
+
+## XPackagePlaytestPublishWorkflow — what runs upstream
+
+File: `src/XPackage/XPackageWorkflow/XPackageWorkflow/Workflows/Playtest/XPackagePlaytestPublishWorkflow.cs`
+
+State machine: Starting → Validation → FetchingContentIds → StartingContentSubmissionJob → PollingContentSubmissionJob → PlaytestProductCreation → SuccessCompletion (or FailedCompletion).
+
+Already takes `FlightIds` and `MarketGroupPackages` as input parameters — see `XPackageWorkflow.Shared/Workflows/PlaytestPublish/PlaytestPublishJobParameters.cs`. **This is the "xplaytest flights" the project doc refers to.** Today the workflow ends without calling GSSV ContentIngestion or Partner Registry — our project adds those.
+
+Two reasonable places to add the GSSV ingestion call:
+1. **A new step inside the workflow** between `PlaytestProductCreation` and `SuccessCompletion`. Pros: atomic; can retry; cleaner failure mode. Cons: requires changes to the workflow in `Xbox.Xbet.Service/src/XPackage/...`.
+2. **Inside `XPackagePlaytestPublishWorkflowJobStatusTopicProcessor`** in PlayTest core (downstream of the existing completion event). Pros: lighter change, isolated to PlayTest. Cons: outside the workflow's retry semantics; if PlayTest is down the call is lost (although ServiceBus retries would help).
+
+Recommendation: start with option 2 (smaller blast radius, easier to ship as P0), and migrate to option 1 if reliability requires it.
+
+## PlaytestResponse fields (data already in the contract)
+
+```
+PlaytestId, PartnerCenterProductId, SellerId, Name, StartDate, EndDate,
+CreatedAt, Status, Type, Description, GameArtUrl,
+PlaytestXPackagePublishJobId, PlaytestXProductInfo,
+Audiences, Packages, ServicingContentIds, StatusDetail,
+PlaytestXPackageDeleteJobId
+```
+
+For streaming:
+- `PartnerCenterProductId` → maps to `Title.ProductId` in Partner Registry
+- `EndDate` → can set `OfferingV2.ExpirationTime`
+- `Audiences` → maps to `PlayerAuthorizationOptions.AllowedFlights` (mechanism TBD)
+- `Name`, `Description`, `GameArtUrl` → for the shareable link preview (consumed by Bayside)
+
+A new field — `CloudStreamingEnabled : bool` (or equivalent) — almost certainly needs to be added to `PlaytestCreateRequest`/`PlaytestUpdateRequest` so creators can opt in.
+
+## Other Xbox.Xbet.Service services to know about
+
+| Directory | What it likely does |
+|---|---|
+| `src/XPackage/XPackageFD` + `XPackageIngestionCore` | MSIXVC2 package ingestion (boxes/segments) — already runs today for all playtests |
+| `src/XPackage/XPackageWorkflow` | Holds the `XPackagePlaytestPublishWorkflow` state machine |
+| `src/XCloudCore` | Read client for xCloud's `/v1/offerings/public` and `/v2/catalog/{offeringId}`. Useful as a ServiceClient template. |
+| `src/StreamingPartnerFD` | A partner-facing streaming FD — appears unrelated to the playtest publish path |
+| `src/ExternalStreamingCatalog` | A streaming catalog service — worth a brief scan, may be the "/offerings" surface for clients |
+| `src/ContentAccess` | Already aware of playtests via `IsPlaytestUserAuthorizedAsync` — and already calls GSSV upstream |
+
+## No existing Partner Registry client
+
+A grep for `PartnerRegistryClient`, `PartnerRegistry`, `partnerregistry` in `src/PlayTest/` returns zero results. **This integration is greenfield work.**

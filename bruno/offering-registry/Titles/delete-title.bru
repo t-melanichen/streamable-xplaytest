@@ -1,0 +1,28 @@
+meta {
+  name: DELETE Title
+  type: http
+  seq: 3
+}
+
+delete {
+  url: {{baseUri}}/v1/offerings/{{offeringId}}/titles/{{titleId}}?partnerid={{partnerId}}
+  body: none
+  auth: bearer
+}
+
+headers {
+  Accept: application/json
+  MS-CV: {{$randomUUID}}.0
+}
+
+auth:bearer {
+  token: {{bearerToken}}
+}
+
+query {
+  partnerid: {{partnerId}}
+}
+
+docs {
+  Delete one title. partnerid is a query string param.
+}

@@ -1,0 +1,25 @@
+meta {
+  name: GET Offering by id
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUri}}/v1/offerings/{{offeringId}}
+  body: none
+  auth: bearer
+}
+
+headers {
+  Accept: application/json
+  MS-CV: {{$randomUUID}}.0
+}
+
+auth:bearer {
+  token: {{bearerToken}}
+}
+
+docs {
+  Read back an OfferingV2 by id. Useful after the PUT to confirm what GSSV persisted
+  (some fields get defaulted server-side and you only learn them by reading back).
+}

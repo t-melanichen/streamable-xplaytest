@@ -1,243 +1,264 @@
-# Design Doc: Instantly Shareable Playtest (P0)
+# Design Doc: Instantly Shareable Playtest — Cloud Streaming for Private Playtests
 
-> **Author**: Melanie Chen  
-> **Status**: Draft  
-> **Last Updated**: 2026-05-21  
-> **Reviewers**: Brian Bowman, Emma Park, Anthony Keller, Timi Bolaji
+**Status**: Draft v0.2 (Week 1-2 research pass)
+**Author**: Melanie Chen (Xbox intern, Juno team, Summer 2026)
+**Manager**: Brian Bowman · **Mentor**: Emma Park · **PM**: Bec Lyons
+**Engineering experts**: Anthony Keller, Timi Bolaji, Ashton Summer, Chuy Galvan
 
 ---
 
 ## 1. Problem Statement
 
-Game creators using xplaytest can upload private RETAIL builds for testers, but testers must download hundreds of GBs locally. This creates barriers:
-- Long download/install times
-- Hardware provisioning burden on creators
-- Security risk from local game code on physical devices
+Today, xplaytest creators can invite testers to download and install pre-release builds via Microsoft Store. This requires a long download, install, and often a dev kit — high friction for casual testers and a poor fit for short-window playtests.
 
-**Proposed solution**: Integrate xplaytest with Xbox Cloud Gaming so creators can share a streaming link — testers play instantly via the browser with no install.
+**Goal**: let creators flip a "cloud streaming" toggle on a playtest, then share a single URL that lets authorized testers stream the playtest build in their browser via xbox.com/play — no install, no console.
 
----
+## 2. P0 Scope (this design covers)
 
-## 2. Goals (P0 Scope)
+1. **Private offering creation**: when a playtest is created with cloud streaming on, PlayTest calls GSSV (`services.partnerregistry/OfferingsController`) to create a private `OfferingV2` whose `AuthorizationOptions.AllowedFlights` map 1:1 to the playtest's DNA audience groups.
+2. **Private offering deletion**: when the playtest is deleted, the offering is deleted.
+3. **Audience updates**: when the playtest audience (DNA groups) changes, the offering's `AllowedFlights` updates within seconds.
+4. **Build ingestion**: when a new build is published for a cloud-enabled playtest, PlayTest calls GSSV ContentIngestion to register the build as streamable.
+5. **Seller allowlist**: offering creation can be limited to specific sellers via PlayTest config (so this rolls out safely behind a flag).
+6. **Tester experience**: clicking the shareable link in Bayside (`xbox.com/play/stream/{productId}?configs=streaming.auth.offering:{offeringId}`) authenticates, verifies flight membership at GSSV session-create time, and streams the playtest's metadata + build.
 
-| # | Goal | Success Metric |
-|---|------|---------------|
-| 1 | Creating a playtest creates a private offering | Offering visible in DevApi Portal within seconds |
-| 2 | Deleting a playtest deletes the private offering | Offering fully cleaned up |
-| 3 | Unique offering naming per playtest | Filterable by title/seller |
-| 4 | Audience DNA group updates sync to offering | DNA group membership = streaming access |
-| 5 | Creation gated by seller allowlist (flights) | Only approved sellers during development |
-| 6 | DNA group auth works for offerings | User's `/offerings` call returns playtest offerings |
-| 7 | Shareable streaming link in xplaytest portal | Link opens Bayside streaming session |
-| 8 | No info leakage for unauthorized users | Bayside shows nothing pre-auth |
-| 9 | New build uploads trigger GSSV ingestion | New build streamable within minutes |
-| 10 | New build configured in private offering | Offering title matches uploaded build |
+## 3. Out of Scope (P1/P2/P3)
 
----
+- Stream Now buttons in Garrison / current playtest UIs
+- Launch arg support
+- Streaming region / touch controls toggles in xplaytest portal
+- Tester feedback collection pipeline
+- xplaytest "View as tester" / preview mode
+- Migrating non-Juno teams to use shared private offering infrastructure
+- DevApi Reader Portal filtering for playtest offerings
 
-## 3. Architecture Overview
+## 4. Architecture
 
 ```
-Creator → xplaytest Portal (PlayTestFD) → PlayTest Core
-                                               │
-                          ┌────────────────────┼────────────────────┐
-                          │                    │                    │
-                          ▼                    ▼                    ▼
-                   Partner Registry      GSSV (build ingest)   ContentAccess
-                   (create offering)     (streaming VMs)       (entitlements)
-                          │                    │
-                          └────────┬───────────┘
-                                   ▼
-                          Play Xbox (Bayside)
-                          (tester streams game)
+                   ┌────────────────────────────┐
+                   │  xplaytest portal frontend │  (location TBD — NOT in 3 local repos)
+                   │  (Partner Center?)         │
+                   └────────┬───────────────────┘
+                            │ HTTPS
+                            ▼
+              ┌────────────────────────────────┐         ┌──────────────────────────┐
+              │  PlayTestFD (front door)       │────────▶│  GMS Service             │
+              │  /api/.../products/.../playtests│ (existing AddS2SAuthHeader)  │
+              │  Xbox.Xbet.Service/src/PlayTestFD  │  PlayTest → GMS → DnaIds  │
+              └────────┬───────────────────────┘         └──────────────────────────┘
+                       │ FabricClient / S2S
+                       ▼
+              ┌────────────────────────────────┐
+              │  PlayTest (core)               │
+              │  Xbox.Xbet.Service/src/PlayTest │
+              │  SQL+EF persistence            │
+              │                                │
+              │  ┌──────────────────────────┐  │
+              │  │ NEW: PartnerRegistry    │  │   PUT/DELETE /v1/offerings, PUT /titles
+              │  │ ServiceClient            │──┼─────────────────────────────────────────▶ GSSV Offering Registry
+              │  └──────────────────────────┘  │                                            (services.partnerregistry,
+              │  ┌──────────────────────────┐  │                                             OfferingsController)
+              │  │ NEW: ContentIngestion   │  │
+              │  │ Client (from NuGet)      │──┼─────────────────────────────────────────▶ GSSV ContentIngestion
+              │  └──────────────────────────┘  │                                            (*.gssv-*.xboxlive.com/api/contentingestion)
+              │  ┌──────────────────────────┐  │
+              │  │ ServiceBus processors    │  │
+              │  │ (extend existing)        │  │
+              │  └──────────────────────────┘  │
+              └────────┬───────────────────────┘
+                       │ ServiceBus topic "job-status"
+                       ▼ (existing)
+              ┌────────────────────────────────┐
+              │  XPackagePlaytestPublishWorkflow│   builds packages, sets FlightIds
+              │  Xbox.Xbet.Service/src/XPackage │
+              └────────────────────────────────┘
+
+  Tester flow:
+  Shareable link  →  xbox.com/play/stream/{productId}?configs=streaming.auth.offering:{offeringId}
+                  →  Bayside (Xbox.JS/apps/play-xbox) loader
+                  →  GSSV  (session-create checks flight membership)
+                  →  Garrison VM  (streams the playtest build)
 ```
 
-### Services Modified
+## 5. The integration touch points
 
-| Service | Changes |
-|---------|---------|
-| **PlayTest Core** | New `PartnerRegistryClient`, offering lifecycle hooks in business logic, extended ServiceBus processor |
-| **Partner Registry** | DNA group auth fix for `/offerings`, possible fast-path for playtest offerings |
-| **Play Xbox (Bayside)** | Handle playtest link route, enforce auth-before-details, DNA group check |
+Five places PlayTest core calls outward. Three are new for this project.
 
----
+| # | Trigger | New code in PlayTest | External call |
+|---|---|---|---|
+| 1 | Playtest created with `CloudStreamingEnabled = true` | `PartnerRegistryServiceClient.PutOfferingAsync` + `PutTitleAsync` | `PUT /v1/offerings/{id}` + `PUT /v1/offerings/{id}/titles/{titleId}` on GSSV registry |
+| 2 | Playtest audience updated | `PartnerRegistryServiceClient.GetOffering` + `PutOffering` with refreshed `AllowedFlights` | `GET` → mutate → `PUT /v1/offerings/{id}` |
+| 3 | Playtest end date updated | `PartnerRegistryServiceClient.PutOffering` with new `ExpirationTime` | `PUT /v1/offerings/{id}` |
+| 4 | New build published (ServiceBus event) | Extend `XPackagePlaytestPublishWorkflowJobStatusTopicProcessor` | `IContentIngestionClient.IngestPackage*` per (marketGroup, packageId) |
+| 5 | Playtest deleted (ServiceBus event) | Extend `XPackagePlaytestDeleteWorkflowJobStatusTopicProcessor` | `DELETE /v1/offerings/{id}` |
 
-## 4. Detailed Design
+The field mapping for #1, #2, #3 is the central design output — see [field-mapping.md](field-mapping.md).
 
-### 4.1 Playtest Creation → Private Offering
+## 6. Detailed mapping — see separate doc
 
-**Trigger**: Creator creates a playtest with `cloudStreamingEnabled: true`
+For every field on `OfferingV2`, `Title`, `Flight`, `PlayerAuthorizationOptions`, and the ContentIngestion request, the exact source field on the PlayTest side (or a default / template / TBD with team) is documented in **[design/field-mapping.md](field-mapping.md)**.
 
-**Flow**:
-1. PlayTestFD receives `POST /api/{locale}/dashboard/products/{productId}/playtests` with new field `cloudStreamingEnabled`
-2. PlayTest Core validates and persists playtest to Cosmos
-3. If `cloudStreamingEnabled`, PlayTest calls Partner Registry:
-   ```
-   POST /v1/offerings
-   {
-     "offeringId": "xpt-{sellerId}-{playtestId}",
-     "displayName": "Playtest: {gameName} ({playtestId})",
-     "type": "playtest",
-     "auth": {
-       "dnaGroupId": "{playtestDnaGroupId}"
-     },
-     "regions": ["default"],  // or creator-configured
-     "sessionLimits": { ... },
-     "expiration": "{playtestExpiration}"
-   }
-   ```
-4. Store returned `offeringId` in playtest Cosmos document
-5. Construct streaming link: `https://xbox.com/play/launch/xpt-{sellerId}-{playtestId}`
-6. Return link to creator via PlayTestFD response
+Highlights:
+- DNA audience groups → `Flight` objects: **reuses the existing `ResolveUserDnaGroupIds` pipeline** (`PlaytestBusinessLogic.cs:1054`). The same GMS call that today produces `PlaytestPublishJobParameters.FlightIds` produces the offering's `AllowedFlights`.
+- Title.ProductId = `playtest.PartnerCenterProductId`. Title has no BuildId — Partner Registry only references ProductIds; specific builds are picked by GSSV at session time.
+- OfferingV2 streaming infra fields (`Regions`, `DefaultAllocationPools`, `SystemUpdateGroupWeights`, `ServiceLevel`, ...) come from a PlayTest-side template (config or sister offering) — values need GSSV team validation.
 
-**Flight gate**: Check `IsCloudStreamingEnabled` flight flag + seller allowlist before step 3.
+## 7. New fields on PlayTest contracts
 
-### 4.2 Playtest Deletion → Offering Cleanup
+| Field | Type | Where |
+|---|---|---|
+| `CloudStreamingEnabled` | bool | `PlaytestCreateRequest`, `PlaytestUpdateRequest`, `PlaytestResponse`, `PlaytestEntity` |
+| `OfferingId` | string? | `PlaytestEntity` (set after successful PUT, used for subsequent ops) |
+| `TitleId` | string? | `PlaytestEntity` |
+| `OfferingStatus` | enum (NotCreated / Pending / Active / Failed / Deleting / Deleted) | `PlaytestEntity` |
+| `OfferingFailureReason` | string? | `PlaytestEntity` |
 
-**Trigger**: Creator deletes a playtest (or existing `XPackagePlaytestDeleteWorkflowJobStatusTopicProcessor` fires)
+These need:
+- A new EF migration for the SQL schema (PlayTest uses SQL+EF cutover, not Cosmos)
+- Protobuf field additions on `PlaytestResponse` etc. (incrementing the `[ProtoMember]` tags)
+- Validation rules in `PlayTest/Validations/Rules/` for the new state machine
 
-**Flow**:
-1. PlayTest Core receives delete request
-2. Read `offeringId` from playtest Cosmos document
-3. Call Partner Registry: `DELETE /v1/offerings/{offeringId}`
-4. Delete playtest from Cosmos (existing behavior)
+## 8. The PartnerRegistryServiceClient (new code in PlayTest)
 
-### 4.3 Audience/DNA Group Update → Offering Config Sync
+Follows the existing `AgeRatingServiceClient` template (`src/PlayTest/PlayTest/ServiceClients/AgeRatingService/AgeRatingServiceClient.cs:27`):
 
-**Trigger**: Creator changes the DNA group for a playtest's audience
+```csharp
+namespace PlayTest.ServiceClients.PartnerRegistryService;
 
-**Flow**:
-1. `PlaytestGroupsController` receives group update
-2. PlayTest business logic updates audience in Cosmos
-3. If playtest has `offeringId`, call Partner Registry:
-   ```
-   PATCH /v1/offerings/{offeringId}
-   {
-     "auth": {
-       "dnaGroupId": "{newDnaGroupId}"
-     }
-   }
-   ```
-
-### 4.4 Build Upload → GSSV Ingestion + Offering Title Update
-
-**Trigger**: `XPackagePlaytestPublishWorkflowJobStatusTopicProcessor` fires after a build is published
-
-**Flow**:
-1. ServiceBus processor receives publish completion event
-2. Check if playtest has `cloudStreamingEnabled` and `offeringId`
-3. Call GSSV to ingest the new build:
-   ```
-   POST /v1/builds/ingest
-   {
-     "packageId": "{xpackageId}",
-     "productId": "{partnerCenterProductId}",
-     "offeringId": "{offeringId}"
-   }
-   ```
-4. Once ingested, update the offering's title configuration:
-   ```
-   PUT /v1/offerings/{offeringId}/titles
-   {
-     "titles": [{
-       "productId": "{partnerCenterProductId}",
-       "buildId": "{ingestedBuildId}",
-       "platform": "XboxOneAndSeriesX"
-     }]
-   }
-   ```
-5. Game is now streamable on the new build
-
-### 4.5 Tester Streaming Experience (Bayside)
-
-**Trigger**: Tester clicks shareable link `https://xbox.com/play/launch/xpt-{sellerId}-{playtestId}`
-
-**Flow**:
-1. Bayside route handler receives request
-2. **Force login** — redirect to auth if not signed in (no offering details revealed)
-3. After auth, call GSSV: `GET /offerings/{offeringId}` with user token
-4. GSSV checks DNA group membership for the offering
-5. **If authorized**: 
-   - Fetch and display playtest metadata (title, art, "This is a non-public playtest build")
-   - Show "Stream Now" button
-   - On click: initiate streaming session
-6. **If not authorized**:
-   - Show generic "You don't have access" message
-   - No game title, art, or details leaked
-
-### 4.6 Flights / Seller Allowlist
-
-- New PlayTest configuration: `AllowedCloudStreamingSellers` (list of seller IDs)
-- Feature flag: `IsCloudStreamingEnabled` (global kill switch)
-- On offering creation, check both before proceeding
-- Follows existing `Configurations/` patterns in PlayTest Core
-
----
-
-## 5. Security Considerations
-
-| Risk | Mitigation |
-|------|-----------|
-| Playtest details leaked to non-members | Bayside enforces auth before revealing ANY offering info |
-| Unauthorized streaming access | DNA group checked by GSSV at session start |
-| Offering created for unauthorized seller | Flight gate + seller allowlist in PlayTest |
-| Stale offering after playtest deletion | Deletion is synchronous; consider async cleanup job as backup |
-| Build available before offering is ready | Offering title update only happens AFTER successful ingestion |
-
----
-
-## 6. Data Model Changes
-
-### PlayTest Cosmos Document (new fields)
-```json
+public interface IPartnerRegistryServiceClient
 {
-  "playtestId": "guid",
-  "cloudStreamingEnabled": true,
-  "offeringId": "xpt-{sellerId}-{playtestId}",
-  "streamingLink": "https://xbox.com/play/launch/xpt-...",
-  "lastIngestedBuildId": "guid",
-  "offeringCreatedAt": "2026-06-15T00:00:00Z"
+    Task<OfferingV2> GetOfferingAsync(string offeringId, CancellationToken ct);
+    Task PutOfferingAsync(string offeringId, OfferingV2 offering, CancellationToken ct);
+    Task DeleteOfferingAsync(string offeringId, CancellationToken ct);
+    Task PutTitleAsync(string offeringId, string titleId, string partnerId, Title title, CancellationToken ct);
+    Task DeleteTitleAsync(string offeringId, string titleId, string partnerId, CancellationToken ct);
+}
+
+public class PartnerRegistryServiceClient : ServiceClient, IPartnerRegistryServiceClient
+{
+    [UrlFormat("v1/offerings/{offeringId}")]
+    public Task<OfferingV2> GetOfferingAsync(...) { ... }
+
+    [UrlFormat("v1/offerings/{offeringId}")]
+    public Task PutOfferingAsync(...) { ... }   // PUT — upsert, not POST
+
+    [UrlFormat("v1/offerings/{offeringId}/titles/{titleId}?partnerid={partnerId}")]
+    public Task PutTitleAsync(...) { ... }
 }
 ```
 
-### Partner Registry OfferingV2 (leverage existing fields)
-- `auth.dnaGroupId` — maps to playtest audience group
-- `type` or tag — "playtest" to distinguish from production offerings
-- `expiration` — matches playtest end date
+S2S auth uses `IS2SAuthHelper.AddS2SAuthHeaderAsync(request, _s2SScope, ct)` exactly like `AgeRatingServiceClient`. New config section in `appsettings.json`: `PartnerRegistryServiceClient` with `BaseUri` + `ResourceId`. The PlayTest AAD app must be added to `AllowedS2SAppIds` on the GSSV registry side.
 
----
+## 9. The PartnerRegistry call (offering create)
 
-## 7. Open Questions
+```csharp
+public async Task<string> CreatePlaytestOfferingAsync(PublishedPlaytestEntity playtest, CancellationToken ct)
+{
+    if (!playtest.CloudStreamingEnabled)
+        return null;
 
-| # | Question | Owner | Notes |
-|---|----------|-------|-------|
-| 1 | Does Partner Registry need a fast-path that skips ADO PR approval for playtest offerings? | Partner Registry team | Success metric requires "within seconds" |
-| 2 | What's the exact GSSV build ingestion API? | GSSV team (Anthony Keller?) | Need API spec |
-| 3 | How does DNA group auth currently work in GSSV's `/offerings`? | GSSV team | Known issue: DNA group offerings don't show in user's `/offerings` |
-| 4 | Should the streaming link use a new Bayside route or the existing offering enrollment flow? | Xbox.JS team | Existing dev mode supports private offerings |
-| 5 | What metadata is available for playtest titles in the offering? | xplaytest / Partner Center | Title, art, genre — what's already in Partner Center? |
-| 6 | What are the session limits/regions for playtest offerings? | PM (Brian Bowman) | Cost/capacity implications |
-| 7 | Can playtest offerings auto-expire with the playtest? | Partner Registry team | Avoid orphaned offerings |
+    // 1. Resolve DNA flights (reuses existing logic — see flights-and-dna-groups.md)
+    var flightIds = await _audienceFlightResolver.ResolveAsync(
+        playtest.SellerId, playtest.PublishedPlaytestAudiences, ct);
 
----
+    if (flightIds.Count == 0)
+        throw ServiceErrorHelper.CreateValidationError(
+            $"Cloud streaming playtest {playtest.PublishedPlaytestId} has no resolvable DNA flights");
 
-## 8. Rollout Plan
+    // 2. Build OfferingV2 (see field-mapping.md sections 1, 3, 5)
+    var offeringId = $"xpt-{playtest.PublishedPlaytestId:N}";
+    var offering = _offeringTemplateProvider.CloneTemplate();
+    offering.Id = offeringId;
+    offering.PartnerId = playtest.SellerId;
+    offering.Name = playtest.PlaytestName;
+    offering.Notes = $"playtestId={playtest.PublishedPlaytestId}; seller={playtest.SellerId}";
+    offering.ExpirationTime = playtest.PlaytestEndDate;
+    offering.AuthorizationOptions = new PlayerAuthorizationOptions
+    {
+        AllowAllAuthenticatedUsers = false,
+        AllowedSandboxId = PackageConstants.RetailSandbox,
+        AllowedFlights = flightIds.Select(id => new Flight { FlightId = id }).ToList(),
+        CheckStoreEntitlements = false,
+    };
+    offering.OwnedBy = [playtest.SellerId, "xpt-service"];
 
-1. **Phase 1 (Weeks 5-6)**: PlayTest → Partner Registry integration (create/delete/update offering)
-2. **Phase 2 (Week 7)**: ServiceBus build ingestion + offering title update
-3. **Phase 3 (Weeks 8-9)**: Bayside playtest link handling + streaming UX
-4. **Phase 4 (Week 10)**: DNA group auth fix in GSSV/offerings
-5. **Phase 5 (Weeks 11-12)**: Documentation, dashboards, monitoring, TSGs
+    // 3. PUT offering (upsert)
+    await _partnerRegistryClient.PutOfferingAsync(offeringId, offering, ct);
 
-All phases gated behind seller allowlist. Gradually expand to more sellers as confidence grows.
+    // 4. Build + PUT title (see field-mapping.md section 2)
+    var titleId = $"t-{playtest.PublishedPlaytestId:N}";
+    var title = new Title
+    {
+        Id = titleId,
+        PartnerId = playtest.SellerId,
+        ProductId = playtest.PartnerCenterProductId,
+        Platform = ResolvePlatform(playtest),
+        AvailableTime = playtest.PlaytestStartDate,
+        ExpirationTime = playtest.PlaytestEndDate,
+        IsEnabled = true,
+        AllowedFlights = flightIds.Select(id => new Flight { FlightId = id }).ToList(),
+        FriendlyName = playtest.PlaytestName,
+    };
+    await _partnerRegistryClient.PutTitleAsync(offeringId, titleId, playtest.SellerId, title, ct);
 
----
+    return offeringId;
+}
+```
 
-## 9. Dependencies & Risks
+## 10. The ContentIngestion call (build publish)
 
-| Dependency | Risk | Mitigation |
-|-----------|------|-----------|
-| GSSV build ingestion API | May not exist yet; need API designed | Prototype with manual offering creation first |
-| DNA group in /offerings | Known issue — needs GSSV fix | Work with GSSV team early; may need their help |
-| Partner Registry fast-path | PR approval flow could block speed | Discuss with Partner Registry team in Week 3 |
-| Bayside routing | New route may need review/approval | Use existing dev mode flow as starting point |
+The exact request shape is gated on inspecting the NuGet — see [architecture/package-ingestion.md](../architecture/package-ingestion.md). Pseudocode:
+
+```csharp
+public async Task IngestPlaytestBuildsAsync(PublishedPlaytestEntity playtest, IList<PlaytestServicingContentIdEntity> scids, CancellationToken ct)
+{
+    if (!playtest.CloudStreamingEnabled) return;
+
+    var marketGroups = BuildMarketGroupPackages(playtest, scids);            // existing helper
+    var flightIds = await _audienceFlightResolver.ResolveAsync(playtest.SellerId, playtest.PublishedPlaytestAudiences, ct);
+
+    foreach (var marketGroup in marketGroups)
+    {
+        foreach (var packageId in marketGroup.PackageIds)
+        {
+            var request = BuildIngestPackageRequest(packageId, marketGroup, playtest, flightIds);
+            await _contentIngestionClient.IngestPackageAsync(request, ct);   // ← NuGet contract TBD
+        }
+    }
+}
+```
+
+## 11. Failure modes & retries
+
+- **GSSV registry PUT fails**: persist `OfferingStatus = Failed`, surface in PlayTestFD. Retry on next playtest update; do not auto-retry to avoid loops.
+- **ContentIngestion call fails**: log + dead-letter the Service Bus message (existing PlayTest pattern). Operator can replay.
+- **GMS group resolve fails partially**: today PlayTest throws on any single GMS failure (`ResolveUserDnaGroupIds:1102`). Keep that behavior — better to fail loud than ship an over-permissive offering.
+- **Build is ingested into GSSV but offering creation fails later**: stale package; harmless (no offering references it). Cleanup not required for P0.
+- **Offering created but build ingestion fails**: tester gets "not available" — surface in playtest UI as `Status = Awaiting Build Ingestion`.
+
+## 12. Security considerations
+
+- **Never** call PUT offering without a successful DNA→Flight resolve. Guard with the same validation rule as the existing publish workflow (line 897 of `PlaytestBusinessLogic.cs`).
+- The shareable link **must not** leak title metadata pre-auth. Bayside's loader already redirects on `isPrivate` (`loader.server.ts:28-83`) — verify that the playtest's product info doesn't get served in the HTML <head/> before redirect.
+- The PlayTest AAD app needs the minimum S2S permission on the GSSV registry (probably a custom role to be requested via the GSSV team).
+- Seller allowlist (`PlaytestConfig.CloudStreamingAllowlistedSellers : string[]`) checked at offering-create time.
+
+## 13. Rollout
+
+| Milestone | Date | Gate |
+|---|---|---|
+| Week 1-2 | Sept 2026 | Onboarding + research (this doc) |
+| Week 3-4 | mid-Oct | Design review with manager + GSSV team |
+| Week 5-6 | end Oct | Build offering create + delete; feature-flagged off |
+| Week 7-8 | mid-Nov | Build ContentIngestion call; e2e with one test seller |
+| Week 9-10 | end Nov | Audience updates; widen allowlist to 2-3 sellers |
+| Week 11-12 | mid-Dec | Telemetry, docs, polish; final review |
+
+## 14. Open questions (for team — pulled into [open-questions-for-team.md](open-questions-for-team.md))
+
+Top blockers:
+1. **GSSV ContentIngestion exact request shape** — must come from NuGet inspection + GSSV team
+2. **Streaming infra defaults** — what `Regions` / `DefaultAllocationPools` / `ServiceLevel` should a playtest offering have? Is there a template offering to clone?
+3. **Where does the xplaytest portal frontend live?** — not in any of the 3 local repos
+4. **`PackageFlightingConfig` semantics** — is `PrincipalGroupId : Guid` the same as a DNA group id?
+5. **Seller-PartnerId resolution** — is `playtest.SellerId` directly usable as `OfferingV2.PartnerId`, or is there a lookup?

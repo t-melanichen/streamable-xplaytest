@@ -1,125 +1,152 @@
-# Architecture: Package Ingestion into xCloud
+# Architecture: Package / Build Ingestion for Streaming
 
-> **Status**: Investigation summary — contains a significant gap
-
-The P0 goal *"When a new build is uploaded for a playtest that is configured for cloud, that build is ingested into Game Streaming Services"* requires kicking off package ingestion on the xCloud side. This document captures what we know and what is missing.
+> **The 3-system distinction**: GSSV, ContentIngestion, and XPackage Ingestion are three different things. xPlayTest and GSSV do not talk today — this is net-new integration.
 
 ---
 
-## What We Know
+## The three systems
 
-### 1. The ingestion client lives in a NuGet package
-**File**: `services.partnerregistry\src\Product\PartnerRegistryService\PartnerRegistryService.csproj:24`
+| # | System | Lives in | Owned by | What it does |
+|---|---|---|---|---|
+| 1 | **XPackage Ingestion** (existing) | `Xbox.Xbet.Service/src/XPackage/XPackageFD` + `XPackageIngestionCore` + `XPackageWorkflow` | Xbox build/package team | Takes raw MSIXVC2 build → segments into boxes → tracks status. **Already runs today for every playtest publish via `XPackagePlaytestPublishWorkflow`.** |
+| 2 | **GSSV ContentIngestion** (NEW integration) | External — `https://*.gssv-*.xboxlive.com/api/contentingestion/`. Client via NuGet `Microsoft.GameStreaming.ContentIngestion.Client 1.0.2604.2902`. | GSSV team | The intern calls this to register an XPackage-ingested build with the xCloud streaming infrastructure. **GSSV does not kick this off itself — PlayTest has to.** |
+| 3 | **GSSV Offering Registry** = `services.partnerregistry` (NEW integration) | `services.partnerregistry/src/Product/PartnerRegistryService` (namespace `Microsoft.GameStreaming.Partners.Contracts`) | GSSV team | The offering CRUD API. PlayTest calls this to create / update / delete the private offering and its title. |
 
-```xml
-<PackageReference Include="Microsoft.GameStreaming.ContentIngestion.Client" Version="1.0.2604.2902" />
-```
+System (1) is the existing pipeline. Systems (2) and (3) are the two new integrations the intern owns. Both (2) and (3) are GSSV-owned services — they just live in different repos and have different APIs.
 
-The actual `IContentIngestionClient` interface and the request/response contracts are **NOT in any of the 3 local repos**. They are in this NuGet package, which is owned by the **GameStreaming / GSSV team**.
+---
 
-### 2. Partner Registry already wires it up — but only consumes data
-**File**: `services.partnerregistry\src\Product\PartnerRegistryService\Startup.cs:241`
+## What's already in code that we leverage
+
+`PlaytestBusinessLogic.cs:868` already builds `MarketGroupPackages` for the publish workflow:
 
 ```csharp
-services.AddGSHttpClient<IContentIngestionClient, ContentIngestionClient>();
+var marketGroupPackages = publishedPlaytestEntity.PublishedPlaytestPackages
+    .Where(p => !string.IsNullOrWhiteSpace(p.MarketGroupId))
+    .GroupBy(p => p.MarketGroupId, StringComparer.OrdinalIgnoreCase)
+    .Select(g => new MarketGroupPackages
+    {
+        MarketGroupId = g.Key,
+        PackageIds    = g.Select(x => x.PackageId).Distinct().ToList(),
+        ServicingContentId = servicingContentIds
+            .FirstOrDefault(s => s.MarketGroupId == g.Key)?.ServicingContentId.ToString(),
+    })
+    .ToList();
 ```
 
-**File**: `services.partnerregistry\src\Product\PartnerRegistryService\appsettings.en-development.json:41-49`
-```json
-"ContentIngestionClientSettings": {
-  "BaseUri": "https://americas.gssv-dev-test.xboxlive.com/api/contentingestion/"
+This same helper builds the data we pass to GSSV ContentIngestion. Reuse via the existing `BuildMarketGroupPackages` helper.
+
+## Per-build flow (what we add)
+
+```
+Creator uploads new build
+        │
+        ▼
+[XPackage] XPackagePlaytestPublishWorkflow
+   (existing — Validate → FetchContentIds → ContentSubmission → PlaytestProductCreation → Success)
+        │
+        ▼ ServiceBus topic "job-status"
+        │
+[PlayTest core] XPackagePlaytestPublishWorkflowJobStatusTopicProcessor
+        │
+        ▼ Today: only UpdatePlaytestStatusAsync
+        │
+        ▼ NEW: branch on playtest.CloudStreamingEnabled
+        │
+        ├── NO  → existing behavior (status update only)
+        │
+        └── YES → for each (marketGroup, packageId) in BuildMarketGroupPackages(...):
+                      await contentIngestionClient.IngestPackageAsync(BuildIngestRequest(
+                          packageId, marketGroup, playtest, flightIds), ct);
+                  → update playtest status
+```
+
+The offering itself is **not** touched on each build — it was already created at playtest-create time and points at `ProductId`. GSSV picks the most recent ingested build for that ProductId at session time.
+
+## Data PlayTest has available to pass to GSSV ContentIngestion
+
+| Field | Type | Source |
+|---|---|---|
+| `PackageId` | string (XPackage ID, typically a Guid) | `PlaytestPackageEntity.PackageId` |
+| `MarketGroupId` | string | `PlaytestPackageEntity.MarketGroupId` |
+| `CMXPackageSetId` | string | `PlaytestPackageEntity.CMXPackageSetId` (CMX = Content Management Experience) |
+| `ServicingContentId` | Guid (as string) | `PlaytestServicingContentIdEntity` joined by `MarketGroupId` |
+| `ProductBigId` | string | `playtest.PartnerCenterProductId` |
+| `PublisherId` | string | `playtest.SellerId` |
+| `Sandbox` | string | `PackageConstants.RetailSandbox` |
+| `FlightIds` | List&lt;string&gt; | `ResolveUserDnaGroupIds(sellerId, audiences)` → DNA group ids |
+| `PackageFamilyName` | string | from XProduct lookup (existing path in `XPackagePlaytestPublishWorkflow`) |
+
+## GSSV ContentIngestion contract (must verify against NuGet)
+
+What we've verified about the NuGet from grep of services.partnerregistry usages:
+
+- Namespace `Microsoft.GameStreaming.ContentIngestion.Client` exposes `IContentIngestionClient` + `ContentIngestionClient`
+- Namespace `Microsoft.GameStreaming.ContentIngestion.Contracts.External` exposes `WireStreamingPackage`, `PackageInfoForOfferValidation`, `StreamingPackageInfoV2`
+- Namespace `Microsoft.GameStreaming.ContentIngestion.Contracts.External.Assets` exposes `AssetMetadata`, `AssetProperties`, `AssetInfoV2`
+- Namespace `Microsoft.GameStreaming.ContentIngestion.Contracts.External.Query` exposes `PackageSearchQuery`, `IngestionEntityFilter`
+- `WireStreamingPackage` shape (from mock at `MockContentResolutionClient.cs:60-69`):
+  ```csharp
+  new WireStreamingPackage
+  {
+      Id = Guid.NewGuid(),
+      GameMetadata = new AssetMetadata(
+          assetId: Guid.NewGuid(),
+          sourceId: <Id>,             // probably the XPackage PackageId or a derived value
+          markets: ["US"],
+          platforms: ["GEN9"],
+          new AssetProperties
+          {
+              ProductId = <PartnerCenterProductId>,
+              NominalMarket = "US",
+          }),
+  };
+  ```
+- `PackageInfoForOfferValidation` has `PackageId : Guid`, `SourceId : Id`, `MainGameProperties : Dictionary<string,object>` (with constant key `MetadataPropertyNames.MsCatalogProductId`), `Markets`.
+- Dev base URI: `https://americas.gssv-dev-test.xboxlive.com/api/contentingestion/`
+- DI registration uses `services.AddGSHttpClient<IContentIngestionClient, ContentIngestionClient>()` (extension method from the same NuGet that wires up S2S auth)
+
+What we **don't** have from local code: the exact `IngestPackage*` method name(s), request type, and properties. That's in the NuGet assembly.
+
+## How the intern gets the exact contract
+
+1. **Pull the NuGet locally** — restore `services.partnerregistry` once, then look in `%USERPROFILE%\.nuget\packages\microsoft.gamestreaming.contentingestion.client\1.0.2604.2902\` for the assemblies. Open `Microsoft.GameStreaming.ContentIngestion.Client.dll` in **ILSpy** (or `dotnet-symbol` + dotPeek) and read the public interface for `IContentIngestionClient`.
+2. **Find another caller** — search the Microsoft codebase org-wide for `IContentIngestionClient.Ingest` to find a service that already calls it. Copy that pattern.
+3. **Sync with GSSV team** — bring concrete questions:
+   - Exact route(s) under `/api/contentingestion/`?
+   - Required vs optional request properties?
+   - Sync (single response) vs async (202 + job ID + poll)?
+   - What S2S permission does PlayTest's AAD app need?
+   - Is there a dev sandbox we can hit (e.g. `americas.gssv-dev-test`)?
+   - When a Product has multiple ingested builds, how does GSSV pick which to stream? (Latest? Latest matching the flight?)
+   - Does ContentIngestion need to be told about flights, or is that purely on the offering's `AllowedFlights`?
+
+## Trigger point in PlayTest (the new code)
+
+In `src/PlayTest/PlayTest/ServiceBus/MessageProcessors/XPackagePlaytestPublishWorkflowJobStatusTopicProcessor.cs:18-73`, after the existing `UpdatePlaytestStatusAsync` call:
+
+```csharp
+if (statusMessage.Status == JobStatus.Success)
+{
+    var playtest = await _playtestBusinessLogic.GetPlaytestAsync(...);
+    if (playtest.CloudStreamingEnabled)
+    {
+        var packageGroups = BuildMarketGroupPackages(playtest, servicingContentIds);
+        var flightIds = await _audienceFlightResolver.ResolveAsync(playtest.SellerId, playtest.PublishedPlaytestAudiences, ct);
+
+        foreach (var marketGroup in packageGroups)
+        {
+            foreach (var packageId in marketGroup.PackageIds)
+            {
+                await _contentIngestionClient.IngestPackageAsync(
+                    BuildIngestRequest(packageId, marketGroup, playtest, flightIds),
+                    ct);
+            }
+        }
+    }
 }
+
+await playtestBusinessLogic.UpdatePlaytestStatusAsync(...);
 ```
 
-So we know:
-- The base URI pattern: `https://{region}.gssv-{env}.xboxlive.com/api/contentingestion/`
-- DI registration uses `AddGSHttpClient<>` (a GameStreaming-specific extension method — also from the NuGet)
-
-But Partner Registry **does not call any ingestion-trigger methods**. A grep for `IngestPackage`, `IngestBuild`, `IngestContent` returned **no usages in source code** — only validation that reads metadata about already-ingested packages.
-
-### 3. Validation reads ingested package metadata
-**File**: `services.partnerregistry\src\Product\PartnerRegistryService\Processors\Validation\ValidationProcessorUtilities.cs:1514-1545`
-
-```csharp
-var package = packageInfos.FirstOrDefault(
-    p => p.MainGameProperties.ContainsKey(MetadataPropertyNames.MsCatalogProductId) &&
-         productId.Equals(p?.MainGameProperties[MetadataPropertyNames.MsCatalogProductId]?.ToString(),
-            StringComparison.OrdinalIgnoreCase));
-```
-
-This shows that ingested packages carry:
-- `MainGameProperties` (a dictionary including `MsCatalogProductId`)
-- `Markets` (a collection of market codes for multi-market ingestion)
-
-The full shape lives in the NuGet types `WireStreamingPackage` and `PackageInfoForOfferValidation`.
-
-### 4. PlayTest's existing publish processor
-**File**: `Xbox.Xbet.Service\src\PlayTest\PlayTest\ServiceBus\MessageProcessors\XPackagePlaytestPublishWorkflowJobStatusTopicProcessor.cs`
-
-```csharp
-JobType => CoreXPackageJobType.XPackagePlaytestPublishWorkflow;
-// ...
-await playtestBusinessLogic.UpdatePlaytestStatusAsync(...)
-```
-
-The processor fires when an `XPackage` publish workflow completes. **It currently only updates the playtest status — no GSSV/Partner Registry calls.** This is the extension point for our work.
-
----
-
-## The Open Questions
-
-We **do not yet know**:
-
-### A. The exact ingestion contract
-What HTTP route do you POST to? What goes in the body? Possibilities to investigate:
-- `POST /api/contentingestion/v1/packages` with a package manifest?
-- `POST /api/contentingestion/v1/ingest` with a package URI?
-- Something else entirely?
-
-**Where to find this**: 
-1. Pull the `Microsoft.GameStreaming.ContentIngestion.Client` NuGet package and inspect its public interface
-2. Find another service in Microsoft that calls it (search internal codebase for `IContentIngestionClient` usages outside Partner Registry)
-3. Ask the GSSV team (Anthony Keller / Timi Bolaji)
-
-### B. The "package URI" question
-xCloud needs a way to fetch the package. We don't yet know:
-- Does PlayTest need to upload the package to a specific storage location and pass the URL?
-- Or does xCloud know how to fetch the package from XPackage Service given just an ID?
-- What package ID format is expected (XPackage ID? Partner Center Product ID? Both?)
-
-**Where to find this**: same as above. Also examine the `WireStreamingPackage` and `PackageInfoForOfferValidation` types from the NuGet to see what properties an ingested package has.
-
-### C. Auth requirements
-`AddGSHttpClient<>` likely handles S2S auth automatically, but PlayTest will need:
-- An AAD app registration with the right permissions on the ContentIngestion API
-- The correct resource ID / scope to request a token for
-
-### D. Sync vs async ingestion
-The success metric says "A few seconds / minutes after uploading a new build". This implies async — PlayTest probably needs to:
-1. Trigger ingestion (POST returns a job ID or 202 Accepted)
-2. Either poll for completion, or subscribe to a completion event
-3. Only then update the Partner Registry offering's title to point at the new build
-
-### E. Is there an existing ingestion code path?
-**Important hint**: the `XPackagePlaytestPublishWorkflow` is named like there's already a workflow that "publishes" the package somewhere. The publish destination today might already be xCloud-adjacent, just gated for cloud-streaming use. Worth checking with the team whether existing publish already does ingestion partially.
-
----
-
-## Recommended Path Forward
-
-1. **Pull the NuGet package** locally. The intern can run:
-   ```
-   nuget install Microsoft.GameStreaming.ContentIngestion.Client -Version 1.0.2604.2902
-   ```
-   Then inspect the assemblies (e.g., with ILSpy or a similar decompiler — `XBET.Services.sln` likely already references this via NuGet restore so it might already be cached locally).
-
-2. **Search the org-wide code** for `IContentIngestionClient` usage. Other Xbox teams must call it.
-
-3. **Have a 30-min sync with the GSSV team** to get the contract walked through. Bring concrete questions:
-   - What is the HTTP route(s)?
-   - What identifies a package (URI vs ID)?
-   - Sync or async completion?
-   - What S2S permissions does PlayTest need?
-   - Are there test/dev sandboxes we can hit?
-
-4. **Document the answer in `design/api-contracts.md`** once known.
+`BuildIngestRequest(...)` is the function that **needs the NuGet contract** to be fully written.

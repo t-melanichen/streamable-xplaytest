@@ -1,0 +1,80 @@
+meta {
+  name: PUT Title (create or replace a single title on an offering)
+  type: http
+  seq: 2
+}
+
+put {
+  url: {{baseUri}}/v1/offerings/{{offeringId}}/titles/{{titleId}}?partnerid={{partnerId}}
+  body: json
+  auth: bearer
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+  MS-CV: {{$randomUUID}}.0
+}
+
+auth:bearer {
+  token: {{bearerToken}}
+}
+
+query {
+  partnerid: {{partnerId}}
+}
+
+body:json {
+  {
+    "Id": "{{titleId}}",
+    "PartnerId": "{{partnerId}}",
+    "OfferingId": "{{offeringId}}",
+    "Platform": "XboxOneAndSeriesX",
+    "ProductId": "{{productId}}",
+    "FriendlyName": "Melanie test playtest title",
+    "AvailableTime": "2026-09-01T00:00:00Z",
+    "ExpirationTime": "2026-12-31T23:59:59Z",
+    "IsEnabled": true,
+    "AllowedFlights": [
+      { "FlightId": "{{dnaGroupId1}}", "FlightVariations": null }
+    ],
+    "AllowedCountries": null,
+    "ExcludedCountries": [],
+    "AdditionalProductIds": [],
+    "EarlyAccessProductIds": [],
+    "UseBundleProductId": false,
+    "SupportedInputTypes": ["GameController", "Touch"],
+    "OptOutOfGenericTouch": false,
+    "EnableXrsc": false,
+    "HasCustomAvailableTime": true,
+    "HasCustomExpirationTime": true,
+    "IsFreeInStore": false,
+    "Programs": null,
+    "ProgramConfigs": null,
+    "AllocationPools": null,
+    "AllowedServerTypes": null,
+    "AllowedSystemUpdateGroups": null,
+    "TargetServerSkus": null,
+    "RequiredServerResources": null,
+    "AllowedEntitlements": null,
+    "PackageFlightingConfig": null,
+    "PerAccessLevelLimitOverrides": [],
+    "TimeLimitOverrides": [],
+    "SupportedTabs": [],
+    "UserContentPolicyConfig": null
+  }
+}
+
+docs {
+  Upsert one Title on an existing offering.
+
+  - Verb is **PUT** (not POST).
+  - Note: `partnerid` is a **query string param**, not part of the path.
+  - Title contract: services.partnerregistry/src/Product/PartnerRegistryClient/Contracts/Title.cs:18-247
+
+  Note: Title has NO BuildId — Partner Registry only references ProductIds.
+  Specific builds are picked by GSSV at session-create time.
+
+  PackageFlightingConfig is null in this template — set it if the playtest needs to
+  run a non-GA build behind a flight (advanced; see architecture/flights-and-dna-groups.md).
+}

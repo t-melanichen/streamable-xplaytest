@@ -1,0 +1,87 @@
+meta {
+  name: PUT Offering (create or replace)
+  type: http
+  seq: 1
+}
+
+put {
+  url: {{baseUri}}/v1/offerings/{{offeringId}}
+  body: json
+  auth: bearer
+}
+
+headers {
+  Content-Type: application/json
+  Accept: application/json
+  MS-CV: {{$randomUUID}}.0
+}
+
+auth:bearer {
+  token: {{bearerToken}}
+}
+
+body:json {
+  {
+    "Id": "{{offeringId}}",
+    "PartnerId": "{{partnerId}}",
+    "Name": "Melanie test playtest offering",
+    "Notes": "playtestId=test-melanie-001; created via bruno",
+    "OwnedBy": ["{{partnerId}}", "xpt-service"],
+    "ExpirationTime": "2026-12-31T23:59:59Z",
+    "AuthenticationOptions": {
+      "RequireXuid": true
+    },
+    "AuthorizationOptions": {
+      "AllowAllAuthenticatedUsers": false,
+      "AllowedSandboxId": "RETAIL",
+      "CheckStoreEntitlements": false,
+      "AllowedFlights": [
+        { "FlightId": "{{dnaGroupId1}}", "FlightVariations": null }
+      ],
+      "AdditionalClaimsFlights": [],
+      "AllowedPlayerXuids": [],
+      "AllowedPuids": [],
+      "AllowedEntitlements": [],
+      "AllowedSubscriptions": []
+    },
+    "TitleCollections": [],
+    "DefaultAllocationPools": {},
+    "Regions": ["EastUS", "WestUS", "WestEurope"],
+    "TemporarilyDisabledRegions": [],
+    "AllowRegionSelection": true,
+    "ClientCloudSettings": null,
+    "FallbackToGA": false,
+    "SelectableSystemUpdateGroups": [],
+    "ServerIdleWarningTimeInSeconds": 300,
+    "SessionIdleTimeInSeconds": 600,
+    "ResourceHoldTimeoutInSeconds": 60,
+    "ResourceAllocationTimeoutInSeconds": 60,
+    "PerAccessLevelLimitOverrides": [],
+    "TimeLimitOverrides": [],
+    "EnableXboxRegionFallback": true,
+    "DefaultAllowedServerTypes": ["XboxSeriesX"],
+    "SelectableServerTypes": ["XboxSeriesX", "XboxSeriesS"],
+    "DefaultSupportedInputTypes": ["GameController", "Touch"],
+    "DedicatedFQDN": true,
+    "AllowCrossOfferingResume": false,
+    "AllowRigAccessoryConnections": false,
+    "MaxParallelSessionsPerCore": null,
+    "SystemUpdateGroupWeights": {},
+    "ServiceLevel": "Standard",
+    "TabAccessGroup": "",
+    "CanUploadGameFiles": false
+  }
+}
+
+docs {
+  Upsert an OfferingV2.
+
+  - Verb is **PUT** (not POST). Body is the full OfferingV2.
+  - In dev (`https://gssv-dev-test...`) auth is bypassed; bearer can be a placeholder.
+  - In int/prod the AAD app for the bearer token must be in `RegistryManagementConfig.AllowedS2SAppIds`.
+  - Source: services.partnerregistry/src/Product/PartnerRegistryService/Controllers/OfferingsController.cs:21-139
+  - OfferingV2 contract: services.partnerregistry/src/Product/PartnerRegistryClient/Contracts/OfferingV2.cs:18-224
+
+  Streaming-infra fields (Regions, ServiceLevel, DefaultAllocationPools, SystemUpdateGroupWeights, etc.)
+  in this body are PLACEHOLDERS — confirm valid values with GSSV team before using against int/prod.
+}

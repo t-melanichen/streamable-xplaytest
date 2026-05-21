@@ -1,0 +1,24 @@
+meta {
+  name: GET Titles for an Offering
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUri}}/v1/offerings/{{offeringId}}/titles
+  body: none
+  auth: bearer
+}
+
+headers {
+  Accept: application/json
+  MS-CV: {{$randomUUID}}.0
+}
+
+auth:bearer {
+  token: {{bearerToken}}
+}
+
+docs {
+  Returns all titles attached to the offering.
+}

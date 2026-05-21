@@ -1,0 +1,25 @@
+meta {
+  name: DELETE Offering
+  type: http
+  seq: 4
+}
+
+delete {
+  url: {{baseUri}}/v1/offerings/{{offeringId}}
+  body: none
+  auth: bearer
+}
+
+headers {
+  Accept: application/json
+  MS-CV: {{$randomUUID}}.0
+}
+
+auth:bearer {
+  token: {{bearerToken}}
+}
+
+docs {
+  Hard-delete the offering. Make sure to delete its Titles first if Partner Registry
+  doesn't cascade (verify behavior in test).
+}

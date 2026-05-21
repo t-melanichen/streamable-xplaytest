@@ -1,0 +1,25 @@
+meta {
+  name: GET All Offerings
+  type: http
+  seq: 3
+}
+
+get {
+  url: {{baseUri}}/v1/offerings
+  body: none
+  auth: bearer
+}
+
+headers {
+  Accept: application/json
+  MS-CV: {{$randomUUID}}.0
+}
+
+auth:bearer {
+  token: {{bearerToken}}
+}
+
+docs {
+  Returns IEnumerable<OfferingV2>. Useful to look at existing offerings as templates
+  for the streaming-infra fields (Regions, ServiceLevel, DefaultAllocationPools, etc.).
+}
