@@ -6,6 +6,13 @@ Personal documentation repo for the **Instantly Shareable Playtest** intern proj
 
 Let xplaytest creators flip a "cloud streaming" toggle on a playtest, then share a single URL that lets authorized testers stream the build in their browser via xbox.com/play — no install, no console.
 
+> **🟢 Canonical source of truth**: [`research/project-spec.md`](research/project-spec.md) — synthesized from Brian's official project plan PDF. Everything in this repo aligns to it.
+
+## The shape of the work
+
+- **12-week internship** (Summer 2026, ~May–August). Public Preview target is end of Week 6-7 (~6/30); frontend + docs/metrics/polish follow through Week 12.
+- See **[`design/execution-plan.md`](design/execution-plan.md)** for the week-by-week breakdown.
+
 ## The P0 deliverable
 
 A field-by-field mapping from PlayTest's playtest model to GSSV's `OfferingV2` / `Title` / `Flight` model, plus the build-ingestion call to GSSV ContentIngestion.
@@ -54,6 +61,7 @@ bruno/
 
 ## Key Links
 
+- **🟢 [research/project-spec.md](research/project-spec.md)** — **canonical source of truth** (P0/P1/P3, 12-week timeline, contacts, outcomes)
 - **[design/field-mapping.md](design/field-mapping.md)** — the P0 mapping deliverable
 - **[design/execution-plan.md](design/execution-plan.md)** — week-by-week project plan synthesized from all call notes
 - [design/design-doc.md](design/design-doc.md) — formal design doc
@@ -67,4 +75,5 @@ bruno/
 - [research/partner-registry.md](research/partner-registry.md)
 - [research/bayside-play-xbox.md](research/bayside-play-xbox.md)
 - [research/call-notes-jack-heuberger-2026-05-21.md](research/call-notes-jack-heuberger-2026-05-21.md) — onboarding call with Jack (xCloud, built TitleIngestion)
+- [research/call-notes-park-kushmerick-2026-05-21.md](research/call-notes-park-kushmerick-2026-05-21.md) — onboarding sync with Emma Park + David Kushmerick + David Retterath
 - [bruno/offering-registry/README.md](bruno/offering-registry/README.md) — Bruno collection for testing offering create/get/update/delete against GSSV dev

@@ -129,12 +129,25 @@ You don't call Partner Registry / Content Ingestion directly. All traffic goes t
 | ContentAccess | XBET / Commerce | Entitlements, content access rules |
 | Play Xbox (Bayside) | Xbox.JS / Juno | Player-facing streaming web experience |
 
-## Key contacts (so far)
+## Key contacts
 
-| Person | Team | Role for this project |
+> Canonical list (with PDF-verbatim role labels) is in [`research/project-spec.md`](../research/project-spec.md) §Key contacts.
+
+| Person | Team / Role | Role for this project |
 |---|---|---|
-| **Jack Heuberger** | xCloud (GSSV) | Built `TitleIngestion` as his own intern project — primary expert. Owns onboarding into GSAM Services / LinkPad / Sage routes. Working with Timi on the rubber-stamp PR workaround. |
-| **Timi** | xCloud (GSSV) | Microsoft Store integration expert; co-owns rubber-stamp PR workaround. |
-| **Anthony Keller** | xCloud (GSSV) | S2S onboarding / app id allowlists (per earlier onboarding notes). |
-| **Brian (Bowman)** | xplaytest (manager) | Will help track down PlayTest service client app id for Sage registration. |
-| **David** | xplaytest / org | Sponsored the project; messaged Jack months ago about the intern project idea. |
+| **Brian Bowman** | xplaytest — **Intern Manager** | Scope decisions, project blockers escalation, PlayTest service identity app ID, Connects |
+| **Aditya Toney** | **Onboarding Buddy** | Initial setup, equipment, environment problems |
+| **Emma Park** | **Intern Mentor** | Day-to-day support, test account access, Partner Center onboarding, Garrison setup |
+| **Jessie Masih** | **Administrative Assistant** | Workplace resources, office setup, events |
+| **David Kushmerick** + **Bec Lyons** | xplaytest — **Feature Team Leader** (jointly) | Feature accountability, design review, ATG sample workflow (Kushmerick), shadow publishing pipeline, group enumeration delays, xplaytest portal UI scoping |
+| **Anthony Keller** | xCloud (GSSV) — **Engineering Expert** | S2S onboarding / app id allowlists; original onboarding contact |
+| **Timi Bolaji** | xCloud (GSSV) — **Engineering Expert** | Microsoft Store integration; co-owns rubber-stamp PR workaround |
+| **Ashton Summer**, **Chuy Galvan** | **Engineering Experts** | Additional ICs to be brought in as their areas surface |
+| **Ellery Charlson** | **UR Champ** | Program-wide events, Final Presentation scheduling, escalation for things the team can't help with |
+| **Jack Heuberger** | xCloud (GSSV) — discovered via call | Built `TitleIngestion` as his own intern project — primary expert. Owns onboarding into GSAM Services / LinkPad / Sage routes. Working with Timi on rubber-stamp workaround. |
+| **David Retterath** | xCloud — discovered via call | Offerings ↔ DNA groups ↔ titles model; multi-version gap; committed ongoing PM + Dev support |
+| **Retterath's PM + Dev** (TBD) | xCloud | Joining Week 2 for ongoing collaboration — design review, GSSV-side prioritization |
+
+## Integration touch points (per official spec)
+
+Per Outcome #2 in [`research/project-spec.md`](../research/project-spec.md): a new relationship / endpoint / functionality exists within **catalog / Content Access / Hydration** to support private offering / playtest content metadata. Weeks-5-7 milestone explicitly lists "CAS?" as a service to work in. **Content Access Service / Hydration** is a real integration target — likely surfacing playtest private-offering metadata to Bayside.

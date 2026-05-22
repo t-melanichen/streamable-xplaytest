@@ -2,8 +2,11 @@
 
 **Status**: Draft v0.2 (Week 1-2 research pass)
 **Author**: Melanie Chen (Xbox intern, Juno team, Summer 2026)
-**Manager**: Brian Bowman · **Mentor**: Emma Park · **PM**: Bec Lyons
-**Engineering experts**: Anthony Keller, Timi Bolaji, Ashton Summer, Chuy Galvan
+**Manager**: Brian Bowman · **Onboarding Buddy**: Aditya Toney · **Mentor**: Emma Park · **Admin**: Jessie Masih
+**Feature Team Leaders**: David Kushmerick + Bec Lyons (jointly)
+**Engineering Experts**: Anthony Keller, Timi Bolaji, Ashton Summer, Chuy Galvan
+**UR Champ**: Ellery Charlson
+**xCloud collaborators** (discovered via calls, not in PDF): Jack Heuberger (built TitleIngestion), David Retterath (committed PM + Dev)
 
 ---
 
@@ -264,18 +267,17 @@ public async Task IngestPlaytestBuildAsync(PublishedPlaytestEntity playtest, ILi
 
 ## 13. Rollout
 
-> **Deadline change (2026-05-21)**: per Retterath, public-preview target is **end of June / early July 2026** — ~6-7 weeks from start of project. Compressing the earlier mid-December timeline accordingly. End-of-November intern-exit is now well past public preview, so the project plan is "ship to PP, then stabilize."
+> **Official 12-week intern timeline** (per Brian's project plan PDF — see [`research/project-spec.md`](../research/project-spec.md)). **Public Preview** (per Retterath, 2026-05-21) aligns with the **Midpoint Connect at end of Core Service Work (Week 6-7, ~6/30)** — PP is the project **midpoint**, not the end. ~5 more weeks of frontend + polish follow.
 
-| Milestone | Date | Gate |
-|---|---|---|
-| Week 1 | wk of 2026-05-19 | Onboarding + research + this doc (in flight) |
-| Week 2 | wk of 2026-05-26 | Auth + LinkPad unblocked via Jack; design review with Retterath's PM+Dev (joining next week); decide single-version vs multi-version scope for v1 |
-| Week 3 | wk of 2026-06-02 | Implement PlayTest → Partner Registry offering CRUD; gated behind feature flag; one test seller |
-| Week 4 | wk of 2026-06-09 | Implement TitleIngestion submission from `XPackagePlaytestPublishWorkflowJobStatusTopicProcessor`; E2E with ATG VideoTexture sample as test package |
-| Week 5 | wk of 2026-06-16 | Audience updates (DNA group changes → AllowedFlights mutation); rubber-stamp workaround integrated (Jack+Timi `playtest`-branch); telemetry + dashboards |
-| Week 6 | wk of 2026-06-23 | Bug bash; widen allowlist to 2-3 sellers; tester-side UX polish |
-| **Week 7** | **wk of 2026-06-30** | **Public preview target** |
-| Week 8+ | Jul-Aug | Hardening, multi-version support (if scoped out of v1), Garrison/Bastion stretch goals |
+| Weeks | Date range | Phase | Key gates |
+|---|---|---|---|
+| **1-2** | 5/19 – 5/29 | Onboarding + Welcome (Agency / Copilot CLI ramp-up) | First Connect — **6/2** |
+| **3-4** | 6/2 – 6/12 | Design Doc + Prototyping / Manual Testing | Reviewed design doc; engineering estimates locked |
+| **5-7** | 6/15 – 7/3 | **Core Service Work** — GSSV + xplaytest + CAS | 🎯 **Public Preview** + Midpoint Connect — **6/30** |
+| **8-10** | 7/6 – 7/24 | **Frontend Work** — Bayside player + xplaytest portal (React, Tailwind) | Final Connect — **7/28** |
+| **11-12** | 7/27 – 8/7 | Documentation, Metrics, Polish — dashboards, monitors, TSGs | Final Project Presentation (date TBD by UR Champ) |
+
+See [`design/execution-plan.md`](execution-plan.md) for the full week-by-week breakdown.
 
 **Critical-path risks for the deadline**:
 - Jack+Timi rubber-stamp PR workaround — if it slips, demo-only fallback (manual approval) blocks public preview
