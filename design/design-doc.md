@@ -9,9 +9,16 @@
 
 ## 1. Problem Statement
 
-Today, xplaytest creators can invite testers to download and install pre-release builds via Microsoft Store. This requires a long download, install, and often a dev kit — high friction for casual testers and a poor fit for short-window playtests.
+Today, xplaytest creators can invite testers to download and install pre-release builds via Microsoft Store. This requires a long download, install, and often a dev kit — high friction for casual testers and a poor fit for short-window playtests. **A secondary pain point** (raised by David Kushmerick on 2026-05-21): if a tester already has the retail copy of the same game installed, installing a playtest build of the same product can collide / require uninstall.
 
 **Goal**: let creators flip a "cloud streaming" toggle on a playtest, then share a single URL that lets authorized testers stream the playtest build in their browser via xbox.com/play — no install, no console.
+
+**Why streaming wins for playtests**:
+1. **Instant access** — no multi-GB download wait; clicking the link starts the game in seconds
+2. **No retail-install conflict** — testers keep their retail copy installed and stream a different build of the same product side-by-side
+3. **No dev kit required** — opens playtesting to a much wider, more casual audience
+
+**Target ship date**: end of June / early July 2026 public preview (per Retterath, 2026-05-21).
 
 ## 2. P0 Scope (this design covers)
 
@@ -257,27 +264,38 @@ public async Task IngestPlaytestBuildAsync(PublishedPlaytestEntity playtest, ILi
 
 ## 13. Rollout
 
+> **Deadline change (2026-05-21)**: per Retterath, public-preview target is **end of June / early July 2026** — ~6-7 weeks from start of project. Compressing the earlier mid-December timeline accordingly. End-of-November intern-exit is now well past public preview, so the project plan is "ship to PP, then stabilize."
+
 | Milestone | Date | Gate |
 |---|---|---|
-| Week 1-2 | Sept 2026 | Onboarding + research (this doc) |
-| Week 3-4 | mid-Oct | Design review with manager + GSSV team |
-| Week 5-6 | end Oct | Build offering create + delete; feature-flagged off |
-| Week 7-8 | mid-Nov | Build ContentIngestion call; e2e with one test seller |
-| Week 9-10 | end Nov | Audience updates; widen allowlist to 2-3 sellers |
-| Week 11-12 | mid-Dec | Telemetry, docs, polish; final review |
+| Week 1 | wk of 2026-05-19 | Onboarding + research + this doc (in flight) |
+| Week 2 | wk of 2026-05-26 | Auth + LinkPad unblocked via Jack; design review with Retterath's PM+Dev (joining next week); decide single-version vs multi-version scope for v1 |
+| Week 3 | wk of 2026-06-02 | Implement PlayTest → Partner Registry offering CRUD; gated behind feature flag; one test seller |
+| Week 4 | wk of 2026-06-09 | Implement TitleIngestion submission from `XPackagePlaytestPublishWorkflowJobStatusTopicProcessor`; E2E with ATG VideoTexture sample as test package |
+| Week 5 | wk of 2026-06-16 | Audience updates (DNA group changes → AllowedFlights mutation); rubber-stamp workaround integrated (Jack+Timi `playtest`-branch); telemetry + dashboards |
+| Week 6 | wk of 2026-06-23 | Bug bash; widen allowlist to 2-3 sellers; tester-side UX polish |
+| **Week 7** | **wk of 2026-06-30** | **Public preview target** |
+| Week 8+ | Jul-Aug | Hardening, multi-version support (if scoped out of v1), Garrison/Bastion stretch goals |
+
+**Critical-path risks for the deadline**:
+- Jack+Timi rubber-stamp PR workaround — if it slips, demo-only fallback (manual approval) blocks public preview
+- Jack's TitleIngestion → Offering extension — without it, no E2E happens
+- Retterath's multi-version GSSV work — scope-down to single-version-per-playtest if it can't land by Week 6
 
 ## 14. Open questions (for team — pulled into [open-questions-for-team.md](open-questions-for-team.md))
 
-**Status: many top blockers now answered or in-progress after Jack Heuberger call (2026-05-21). See `open-questions-for-team.md` for the full list including new questions 5f-5h.**
+**Status**: Updated after Jack Heuberger call + Kushmerick/Retterath/Park onboarding sync (both 2026-05-21). See `open-questions-for-team.md` for the full list (questions 5f-5i).
 
-Top blockers:
-1. **Rubber-stamp PR problem in prod** — Confirmed P0 by Jack. Every Partner Registry write creates an ADO PR; SFI forbids self-approval. Jack + Timi are designing a `playtest`-branch workaround that PlayTest's S2S identity can write to without a PR. **PlayTest is a net consumer here — we wait for whatever client methods they ship.** Demo fallback: manual approval. See `open-questions-for-team.md` §5.
-2. **TitleIngestion → Offering linking is GSSV-side work** — current TitleIngestion writes to a `TitleCollection`. Jack to extend it to write to an `Offering` ("pretty easy"). May block PlayTest implementation. See §5g.
-3. **`ProductIngestion.JobParameters.assets`** — Per Jack, likely `null` ("we just need a Big ID"). Open sub-question: does it work for **unpublished** playtest BigIds that aren't store-listed yet? See §5a.
-4. **`sandboxId` for playtest TitleIngestion** — still TBD. See §5b.
-5. **One offering per playtest, or shared offering with per-playtest titles?** — Jack's framing suggests both models exist. Need to decide for design review. See §5f.
-6. **S2S auth onboarding** — In progress with Jack: GSAM Services group add (for Dev API access) + Sage route + caller-app-id registration. Brian helping with the PlayTest service identity app id. See §5e.
-7. **Streaming infra defaults** — what `Regions` / `DefaultAllocationPools` / `ServiceLevel` should a playtest offering have?
-8. **Where does the xplaytest portal frontend live?** — not in any of the 3 local repos
-9. **`PackageFlightingConfig` semantics** — is `PrincipalGroupId : Guid` the same as a DNA group id?
-10. **Seller-PartnerId resolution** — is `playtest.SellerId` directly usable as `OfferingV2.PartnerId`, or is there a lookup?
+Top blockers (ordered by deadline impact):
+1. **Multi-version support for playtests** (NEW, Retterath) — today GSSV resolves "what build to stream" live from X product as latest-ingested-per-productId. Playtests may need multiple concurrent versions of a product. **Cloud-side work owned by Retterath's team.** v1 fallback: single-version-per-playtest scope-down. See §5i.
+2. **Rubber-stamp PR problem in prod** (Kushmerick + Jack) — every Partner Registry write creates an ADO PR; SFI forbids self-approval. Jack + Timi designing a `playtest`-branch workaround. **PlayTest waits.** Demo fallback: manual approval. See §5.
+3. **TitleIngestion → Offering linking is GSSV-side work** (Jack) — current TitleIngestion writes to a `TitleCollection`. Extension to write to an Offering is "pretty easy" but on Jack's todo. May block E2E. See §5g.
+4. **S2S auth onboarding** (Jack) — In progress: GSAM Services group + Sage route + caller-app-id registration + LinkPad scaffold. Brian helping with the PlayTest service identity app id. See §5e.
+5. **`ProductIngestion.JobParameters.assets`** (Jack) — likely `null` ("just need a Big ID"). Open sub-question: does it work for **unpublished** playtest BigIds? See §5a.
+6. **`sandboxId` for playtest TitleIngestion** — still TBD. See §5b.
+7. **One offering per playtest, or shared offering with per-playtest titles?** — design decision for review. See §5f.
+8. **"xCloud distribution Services"** (Kushmerick's term) vs **Content Ingestion** — same thing or downstream? Confirm with Retterath/Jack.
+9. **Streaming infra defaults** — what `Regions` / `DefaultAllocationPools` / `ServiceLevel` should a playtest offering have?
+10. **Where does the xplaytest portal frontend live?** — not in any of the 3 local repos
+11. **`PackageFlightingConfig` semantics** — is `PrincipalGroupId : Guid` the same as a DNA group id?
+12. **Seller-PartnerId resolution** — is `playtest.SellerId` directly usable as `OfferingV2.PartnerId`?

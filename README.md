@@ -24,6 +24,7 @@ architecture/                       Service maps, the flight model, package inge
 
 design/
   ├─ design-doc.md                  Formal design doc (Week 3-4 deliverable)
+  ├─ execution-plan.md              ← How this project actually plays out (week-by-week)
   ├─ field-mapping.md               ← THE P0 DELIVERABLE
   └─ open-questions-for-team.md     Questions for Brian / Anthony / Timi / GSSV team
 
@@ -54,6 +55,7 @@ bruno/
 ## Key Links
 
 - **[design/field-mapping.md](design/field-mapping.md)** — the P0 mapping deliverable
+- **[design/execution-plan.md](design/execution-plan.md)** — week-by-week project plan synthesized from all call notes
 - [design/design-doc.md](design/design-doc.md) — formal design doc
 - [design/open-questions-for-team.md](design/open-questions-for-team.md) — clarifying questions
 - [architecture/flights-and-dna-groups.md](architecture/flights-and-dna-groups.md) — DNA → Flight (already in code)
